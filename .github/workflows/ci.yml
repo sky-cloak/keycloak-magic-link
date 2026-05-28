@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Keycloak ${{ matrix.keycloak }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        keycloak: ["24.0.5", "25.0.6", "26.0.7"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Build and unit-test (Keycloak ${{ matrix.keycloak }})
+        run: mvn -B -Dkeycloak.version=${{ matrix.keycloak }} package
+
+      - name: Integration test against a real Keycloak ${{ matrix.keycloak }}
+        run: ci/integration-test.sh ${{ matrix.keycloak }}
+
+      - name: Upload provider jar
+        if: matrix.keycloak == '26.0.7'
+        uses: actions/upload-artifact@v4
+        with:
+          name: keycloak-magic-link
+          path: target/keycloak-magic-link.jar
+          if-no-files-found: error

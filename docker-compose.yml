@@ -1,0 +1,24 @@
+# Local trial: build the jar, then `docker compose up`.
+#   mvn package && docker compose up
+# Keycloak starts on http://localhost:8080 (admin / admin) with the provider installed.
+# MailHog catches outbound mail on http://localhost:8025 - configure realm SMTP host
+# to `mailhog`, port `1025` to send through it.
+services:
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.7
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mailhog
+    volumes:
+      - ./target/keycloak-magic-link.jar:/opt/keycloak/providers/keycloak-magic-link.jar:ro

@@ -16,11 +16,19 @@ works with any OIDC client you already have.
   for tokens the normal way.
 - **Single-use, time-bound tokens** - 32 bytes of entropy, stored hashed, expire on a
   configurable lifespan (default 10 minutes), invalidated on first consume.
+- **Cluster-wide token store** - tokens live in Keycloak's `SingleUseObjectProvider`
+  (Infinispan), the same store Keycloak uses for its own action tokens. A link issued on one
+  replica is consumable on any other, and tokens survive a rolling restart.
+- **Request rate limiting** - `POST /request` is throttled per client IP and per email on a
+  sliding 60-second window (also cluster-wide). Breaches return `429` with `Retry-After`.
 - **No account enumeration** - the request endpoint returns `202` whether or not the email
-  matches a user; nothing leaks through timing or response shape.
+  matches a user; rate limiting runs before user lookup and keys on the submitted email hash, so
+  even a `429` looks identical for existing and non-existing accounts. Nothing leaks through
+  timing or response shape.
 - **Email through your realm SMTP** - reuses Keycloak's configured outbound mail. No new
   credentials, no second deliverability story.
-- **Zero runtime dependencies** - one jar, no database changes, no extra services.
+- **No new runtime dependencies** - one jar, no database changes, no extra services; it reuses
+  Keycloak's own Infinispan caches.
 
 Works with **Keycloak 24, 25, and 26** (Quarkus distribution).
 
@@ -74,8 +82,8 @@ Mounted under `/realms/{realm}/magic-link`:
 
 | Method & path | Auth | Returns |
 |---|---|---|
-| `GET /health` | public | `{status, name, version, active, tokenLifespanSeconds, tokensPending, totalIssued, totalConsumed}` |
-| `POST /request` | public | `202 Accepted` always (no account enumeration) |
+| `GET /health` | public | `{status, name, version, active, tokenStore, tokenLifespanSeconds, requestsPerMinutePerIp, requestsPerMinutePerEmail}` |
+| `POST /request` | public | `202 Accepted` (no account enumeration), or `429 Too Many Requests` with `Retry-After` when rate-limited |
 | `GET /consume` | public, single-use token | `302` to the bound redirect URI with an OIDC `code` |
 
 ### `POST /request`
@@ -90,10 +98,36 @@ curl -X POST "$KC_URL/realms/$REALM/magic-link/request" \
       }'
 ```
 
-Response is always `202 {"status":"accepted"}`. If the email matches an enabled user and the
+Response is `202 {"status":"accepted"}`. If the email matches an enabled user and the
 client/redirect-URI pair is valid, a magic link is generated and sent through the realm SMTP.
 If anything is off (no such user, disabled user, unknown client, redirect URI not registered)
 the response is identical - the caller cannot probe for account existence.
+
+#### Rate limiting
+
+`POST /request` is throttled on two independent sliding 60-second windows: one per client IP and
+one per submitted email. Limits default to **5 requests/minute/IP** and **3 requests/minute/email**
+and are configurable (see below). When either window is exceeded the endpoint returns:
+
+```
+HTTP/1.1 429 Too Many Requests
+Retry-After: 42
+Content-Type: application/json
+
+{"error":"rate_limited","error_description":"too many magic-link requests; retry later","retry_after":42}
+```
+
+`Retry-After` (seconds) is how long until the oldest in-window request ages out, leaving room for
+one more.
+
+The limit is evaluated **before** any user lookup and the email window is keyed by the SHA-256 of
+the *submitted* email regardless of whether it maps to a user. A `429` therefore looks identical
+whether or not the account exists: rate limiting never becomes an enumeration oracle. A throttled
+request sends no email.
+
+Because the windows live in the same cluster-wide store as the tokens, the limit is enforced
+across all replicas, not per node. The window is only 60 seconds, so the single-node cold-restart
+caveat noted below for tokens does not meaningfully apply here.
 
 ### `GET /consume`
 
@@ -122,28 +156,43 @@ same response shape.
 All optional, read once at startup. Set via CLI flags or the matching `KC_SPI_*` environment
 variables.
 
+The SPI is named `realm-restapi-extension` and this provider's id is `magic-link`, so every flag
+is prefixed `--spi-realm-restapi-extension-magic-link-`.
+
 | Option | Default | Description |
 |---|---|---|
-| `--spi-realm-restapi-provider-magic-link-token-lifespan-seconds` | `600` | how long a magic-link token is valid for, in seconds |
-| `--spi-realm-restapi-provider-magic-link-from-email-override` | _(realm SMTP `from`)_ | overrides the `From:` address on outbound magic-link emails |
-| `--spi-realm-restapi-provider-magic-link-subject-template` | `Your sign-in link` | subject line on the email |
-| `--spi-realm-restapi-provider-magic-link-body-template` | _(see source)_ | email body template; `{link}` is substituted with the consume URL. If the placeholder is absent the link is appended. |
+| `--spi-realm-restapi-extension-magic-link-token-lifespan-seconds` | `600` | how long a magic-link token is valid for, in seconds |
+| `--spi-realm-restapi-extension-magic-link-from-email-override` | _(realm SMTP `from`)_ | overrides the `From:` address on outbound magic-link emails |
+| `--spi-realm-restapi-extension-magic-link-subject-template` | `Your sign-in link` | subject line on the email |
+| `--spi-realm-restapi-extension-magic-link-body-template` | _(see source)_ | email body template; `{link}` is substituted with the consume URL. If the placeholder is absent the link is appended. |
+| `--spi-realm-restapi-extension-magic-link-requests-per-minute-per-ip` | `5` | max `POST /request` calls per minute from one client IP. `0` disables the per-IP limit. |
+| `--spi-realm-restapi-extension-magic-link-requests-per-minute-per-email` | `3` | max `POST /request` calls per minute for one submitted email. `0` disables the per-email limit. |
 
-Example - tighter 5-minute lifespan with a branded subject:
+Example - tighter 5-minute lifespan, a branded subject, and a stricter per-email cap:
 
 ```bash
 bin/kc.sh start \
-  --spi-realm-restapi-provider-magic-link-token-lifespan-seconds=300 \
-  --spi-realm-restapi-provider-magic-link-subject-template="Sign in to Acme"
+  --spi-realm-restapi-extension-magic-link-token-lifespan-seconds=300 \
+  --spi-realm-restapi-extension-magic-link-subject-template="Sign in to Acme" \
+  --spi-realm-restapi-extension-magic-link-requests-per-minute-per-email=2
 ```
 
 ## Notes & limits
 
-- **Token store is per-node and in-memory.** Tokens issued by one Keycloak replica cannot be
-  consumed by a different replica. Run a single replica, or pin requests to one node with a
-  sticky session / hash route. A cluster-aware store is a v2 concern.
+- **Token store is cluster-wide via `SingleUseObjectProvider` (Infinispan).** Tokens live in the
+  same store Keycloak uses for its own action tokens, so a link issued on one replica is
+  consumable on any other and tokens survive a rolling restart. The atomic `remove` on consume
+  is the single-use primitive: even concurrent consumes across nodes can succeed at most once.
+- **Cold-restart caveat (single node only).** In a single-node `start-dev` the Infinispan cache
+  is in-heap, so a full *cold* restart of a lone node clears in-flight links - exactly like
+  Keycloak's own action tokens. This is not durability loss across a cluster or a rolling
+  restart; it only affects a single isolated node going fully down. The 60-second rate-limit
+  windows are short enough that this caveat does not meaningfully affect them.
 - **Tokens are single-use** and invalidated on the first consume; replay attempts fail with
   `401 invalid_token`.
+- **Request rate limiting is on by default** (5/min/IP, 3/min/email) and enforced cluster-wide.
+  Set the per-IP or per-email limit to `0` to disable that dimension. See
+  [Rate limiting](#rate-limiting).
 - **The browser-flow Authenticator is a fast-follow.** This MVP only ships the REST path. The
   intended next addition is a `skycloak-magic-link` Authenticator factory you can drop into a
   copy of the browser flow to give end users a "send me a magic link" form on the login page.
@@ -160,7 +209,11 @@ mvn package                              # build + unit tests
 ci/integration-test.sh 26.0.7            # boot a real Keycloak + MailHog and run an end-to-end test
 ```
 
-CI builds and runs the integration test against Keycloak 24, 25, and 26 on every push.
+Unit tests cover the pure logic (sliding-window prune/count/limit and token-key derivation). The
+integration test boots a real Keycloak with the provider mounted and asserts the happy-path login,
+single-use enforcement, and the rate-limit path (a burst trips `429` with `Retry-After`, a clean
+request still returns `202`, and throttled calls send no email). CI builds and runs it against
+Keycloak 24, 25, and 26 on every push.
 
 ## License
 

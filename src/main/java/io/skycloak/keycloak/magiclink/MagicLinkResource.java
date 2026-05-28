@@ -54,26 +54,32 @@ public final class MagicLinkResource {
     private final KeycloakSession session;
     private final MagicLinkConfig config;
     private final MagicLinkTokenizer tokenizer;
+    private final MagicLinkRateLimiter rateLimiter;
 
-    public MagicLinkResource(KeycloakSession session, MagicLinkConfig config, MagicLinkTokenizer tokenizer) {
+    public MagicLinkResource(KeycloakSession session, MagicLinkConfig config,
+                             MagicLinkTokenizer tokenizer, MagicLinkRateLimiter rateLimiter) {
         this.session = session;
         this.config = config;
         this.tokenizer = tokenizer;
+        this.rateLimiter = rateLimiter;
     }
 
     @GET
     @Path("health")
     @Produces(MediaType.APPLICATION_JSON)
     public Response health() {
+        // The token store is now Keycloak's cluster-wide SingleUseObjectProvider (Infinispan),
+        // which does not expose live counts, so the old per-node pending/issued/consumed counters
+        // are gone. We surface configuration and the store kind instead.
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("status", "ok");
         body.put("name", Version.NAME);
         body.put("version", Version.VERSION);
         body.put("active", tokenizer != null);
+        body.put("tokenStore", "single-use-object");
         body.put("tokenLifespanSeconds", config != null ? config.tokenLifespanSeconds() : 0);
-        body.put("tokensPending", tokenizer != null ? tokenizer.pending() : 0);
-        body.put("totalIssued", tokenizer != null ? tokenizer.totalIssued() : 0L);
-        body.put("totalConsumed", tokenizer != null ? tokenizer.totalConsumed() : 0L);
+        body.put("requestsPerMinutePerIp", config != null ? config.requestsPerMinutePerIp() : 0);
+        body.put("requestsPerMinutePerEmail", config != null ? config.requestsPerMinutePerEmail() : 0);
         return json(Response.Status.OK, write(body));
     }
 
@@ -103,6 +109,19 @@ public final class MagicLinkResource {
         RealmModel realm = session.getContext().getRealm();
         if (realm == null) {
             return json(Response.Status.NOT_FOUND, "{\"error\":\"realm_not_found\"}");
+        }
+
+        // Rate-limit BEFORE any user/client lookup, and key the email window by the SUBMITTED
+        // email hash regardless of whether it maps to a user. This keeps a 429 identical whether
+        // or not the account exists - a breach is the only thing that changes the response, never
+        // account existence. Unknown emails still fall through to the constant-shape 202 below.
+        String clientIp = clientIp();
+        MagicLinkRateLimiter.Decision limit = rateLimiter.check(
+                clientIp, body.email.trim(),
+                config.requestsPerMinutePerIp(), config.requestsPerMinutePerEmail());
+        if (!limit.allowed()) {
+            LOG.debugf("magic-link request rate-limited ip=%s", clientIp);
+            return tooManyRequests(limit.retryAfterSeconds());
         }
 
         // Best-effort lookup and issuance. Failures are logged but the response is always
@@ -277,6 +296,12 @@ public final class MagicLinkResource {
         }
     }
 
+    /** Resolves the client IP via Keycloak's connection (already proxy-aware when configured). */
+    private String clientIp() {
+        ClientConnection connection = session.getContext().getConnection();
+        return connection != null ? connection.getRemoteAddr() : null;
+    }
+
     /** Mask local-part of an email for log lines. */
     private static String redact(String email) {
         if (email == null) {
@@ -310,6 +335,16 @@ public final class MagicLinkResource {
         return Response.status(Response.Status.ACCEPTED)
                 .type(MediaType.APPLICATION_JSON)
                 .entity("{\"status\":\"accepted\"}")
+                .build();
+    }
+
+    private static Response tooManyRequests(long retryAfterSeconds) {
+        return Response.status(429)
+                .header("Retry-After", String.valueOf(retryAfterSeconds))
+                .type(MediaType.APPLICATION_JSON)
+                .entity("{\"error\":\"rate_limited\","
+                        + "\"error_description\":\"too many magic-link requests; retry later\","
+                        + "\"retry_after\":" + retryAfterSeconds + "}")
                 .build();
     }
 

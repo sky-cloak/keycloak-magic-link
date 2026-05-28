@@ -1,98 +1,43 @@
 package io.skycloak.keycloak.magiclink;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * Pure-logic tests for token key derivation. The full SingleUseObjectProvider store path
+ * (issue / consume / single-use / expiry) needs a running Keycloak and is covered by the
+ * integration test.
+ */
 class MagicLinkTokenizerTest {
 
     @Test
-    void issuedTokenConsumesOnceAndOnlyOnce() {
-        MagicLinkTokenizer t = new MagicLinkTokenizer();
-        String token = t.issue("user-1", "my-app", "https://app.example/back", 60);
+    void keyDerivationIsPrefixedSha256Hex() {
+        String token = "0123456789abcdef";
+        String key = MagicLinkTokenizer.keyFor(token);
 
-        Optional<MagicLinkTokenizer.Entry> first = t.consume(token);
-        assertTrue(first.isPresent(), "first consume must succeed");
-        assertEquals("user-1", first.get().userId());
-        assertEquals("my-app", first.get().clientId());
-        assertEquals("https://app.example/back", first.get().redirectUri());
-        assertEquals(1, t.totalConsumed());
-
-        Optional<MagicLinkTokenizer.Entry> second = t.consume(token);
-        assertFalse(second.isPresent(), "tokens are single-use - second consume must fail");
+        assertTrue(key.startsWith(MagicLinkTokenizer.KEY_PREFIX),
+                "key must carry the namespace prefix");
+        String hex = key.substring(MagicLinkTokenizer.KEY_PREFIX.length());
+        assertEquals(64, hex.length(), "SHA-256 hex is 64 chars");
+        assertTrue(hex.matches("[0-9a-f]{64}"), "hex must be lower-case 0-9a-f");
     }
 
     @Test
-    void expiredTokenCannotBeConsumed() {
-        AtomicLong now = new AtomicLong(1_000_000L);
-        Clock clock = new Clock() {
-            @Override
-            public ZoneId getZone() {
-                return ZoneId.systemDefault();
-            }
-
-            @Override
-            public Clock withZone(ZoneId zone) {
-                return this;
-            }
-
-            @Override
-            public Instant instant() {
-                return Instant.ofEpochMilli(now.get());
-            }
-
-            @Override
-            public long millis() {
-                return now.get();
-            }
-        };
-        MagicLinkTokenizer t = new MagicLinkTokenizer(clock);
-        String token = t.issue("user-1", "my-app", "https://app.example/back", 1);
-
-        // Advance past the 1-second lifespan.
-        now.addAndGet(2_000L);
-        Optional<MagicLinkTokenizer.Entry> result = t.consume(token);
-        assertFalse(result.isPresent(), "expired tokens must be rejected");
-        // Expired entries are pruned out of the pending set.
-        assertEquals(0, t.pending(), "expired entries get pruned");
+    void keyDerivationIsDeterministicAndUnique() {
+        assertEquals(MagicLinkTokenizer.keyFor("token-a"), MagicLinkTokenizer.keyFor("token-a"),
+                "same token must derive the same key");
+        assertNotEquals(MagicLinkTokenizer.keyFor("token-a"), MagicLinkTokenizer.keyFor("token-b"),
+                "different tokens must derive different keys");
     }
 
     @Test
-    void unknownTokenIsRejected() {
-        MagicLinkTokenizer t = new MagicLinkTokenizer();
-        assertFalse(t.consume("not-a-real-token").isPresent());
-        assertFalse(t.consume(null).isPresent());
-        assertFalse(t.consume("").isPresent());
-    }
-
-    @Test
-    void issuedTokensAreUniquePerCall() {
-        MagicLinkTokenizer t = new MagicLinkTokenizer();
-        String a = t.issue("user-1", "my-app", "https://app.example/back", 60);
-        String b = t.issue("user-1", "my-app", "https://app.example/back", 60);
-        assertNotEquals(a, b, "every issue must produce a fresh token");
-        assertEquals(2, t.totalIssued());
-        assertEquals(2, t.pending());
-    }
-
-    @Test
-    void invalidIssueArgumentsAreRejected() {
-        MagicLinkTokenizer t = new MagicLinkTokenizer();
-        assertThrows(IllegalArgumentException.class,
-                () -> t.issue(null, "client", "https://x", 60));
-        assertThrows(IllegalArgumentException.class,
-                () -> t.issue("", "client", "https://x", 60));
-        assertThrows(IllegalArgumentException.class,
-                () -> t.issue("user", "client", "https://x", 0));
+    void sha256hexMatchesKnownVector() {
+        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        assertEquals(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                Hashing.sha256hex(""));
     }
 }

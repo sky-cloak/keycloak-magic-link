@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Verify tag matches pom version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          POM_VERSION=$(mvn -q help:evaluate -Dexpression=project.version -DforceStdout)
+          if [[ "$TAG_VERSION" != "$POM_VERSION" ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' implies version '$TAG_VERSION' but pom.xml declares '$POM_VERSION'. Bump the pom or retag."
+            exit 1
+          fi
+          echo "Releasing $POM_VERSION"
+
+      - name: Build release JAR against Keycloak 26.0.7
+        run: mvn -B -Dkeycloak.version=26.0.7 package
+
+      - name: Sanity-check against Keycloak 24.0.5 and 25.0.6
+        run: |
+          mvn -B -Dkeycloak.version=24.0.5 clean compile
+          mvn -B -Dkeycloak.version=25.0.6 clean compile
+          # Rebuild the artifact we ship (KC 26.0.7 is the primary target).
+          mvn -B -Dkeycloak.version=26.0.7 package -DskipTests
+
+      - name: Compose release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${GITHUB_REF_NAME}$" | head -n1 || true)
+          ARTIFACT=$(ls target/*.jar | grep -v -E '(sources|javadoc)\.jar$' | head -n1)
+          ARTIFACT_NAME=$(basename "$ARTIFACT")
+          {
+            echo "## Install"
+            echo
+            echo "Download \`${ARTIFACT_NAME}\` from the Assets below and copy it into Keycloak's providers directory:"
+            echo
+            echo '```bash'
+            echo "cp ${ARTIFACT_NAME} /opt/keycloak/providers/"
+            echo '```'
+            echo
+            echo "Restart Keycloak. See the [README](https://github.com/${GITHUB_REPOSITORY}#readme) for the enable steps and configuration reference."
+            echo
+            echo "## Keycloak compatibility"
+            echo
+            echo "Built against **Keycloak 26.0.7**. CI validates the same code against **24.0.5, 25.0.6, and 26.0.7** on every push."
+            echo
+            if [[ -n "$PREV_TAG" ]]; then
+              echo "## Changes since ${PREV_TAG}"
+              echo
+              git log --pretty='* %s (%h)' "${PREV_TAG}..HEAD"
+            else
+              echo "## First tagged release"
+              echo
+              echo "MVP scope. See the README for what ships in this version."
+            fi
+          } > release-notes.md
+          echo "artifact_path=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Create release and attach JAR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IS_PRERELEASE=""
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            IS_PRERELEASE="--prerelease"
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            $IS_PRERELEASE \
+            "${{ steps.notes.outputs.artifact_path }}"

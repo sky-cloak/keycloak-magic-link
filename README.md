@@ -1,5 +1,9 @@
 # Keycloak Magic Link
 
+![CI](https://github.com/sky-cloak/keycloak-magic-link/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
+![Keycloak](https://img.shields.io/badge/Keycloak-24%20%7C%2025%20%7C%2026-blue.svg)
+
 Drop-in passwordless email sign-in for Keycloak. Send a one-time link to a user's inbox;
 they click it; Keycloak signs them in and redirects back to your app with a standard OIDC
 authorization code. No password, no licensing strings, no extra service to run.
@@ -31,6 +35,11 @@ works with any OIDC client you already have.
   Keycloak's own Infinispan caches.
 
 Works with **Keycloak 24, 25, and 26** (Quarkus distribution).
+
+## Managed option
+
+Prefer not to self-host? [Skycloak](https://skycloak.io) offers managed Keycloak with
+monitoring, automated upgrades, and support. Built and maintained by the Skycloak team.
 
 ## Install
 
@@ -214,6 +223,14 @@ integration test boots a real Keycloak with the provider mounted and asserts the
 single-use enforcement, and the rate-limit path (a burst trips `429` with `Retry-After`, a clean
 request still returns `202`, and throttled calls send no email). CI builds and runs it against
 Keycloak 24, 25, and 26 on every push.
+
+## Naming convention
+
+Identifiers in a server-global namespace are prefixed with `skycloak-` so they cannot
+collide with other extensions on the same Keycloak server: the realm-resource provider ID
+(mounted at the path below). Identifiers scoped to this extension or to a realm are left
+unprefixed: the REST path under `/realms/{realm}/magic-link` and the Maven artifact name.
+This mirrors how other Keycloak extensions namespace their provider IDs.
 
 ## License
 

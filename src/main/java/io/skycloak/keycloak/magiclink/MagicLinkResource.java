@@ -2,6 +2,7 @@ package io.skycloak.keycloak.magiclink;
 
 import java.net.URI;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -111,13 +112,22 @@ public final class MagicLinkResource {
             return json(Response.Status.NOT_FOUND, "{\"error\":\"realm_not_found\"}");
         }
 
+        // Normalize the email once (lower-case + trim) and use the SAME normalized value for the
+        // rate-limit key and the user lookup below. Keycloak resolves users by email
+        // case-insensitively (it lower-cases the lookup), so without this an attacker could vary
+        // the casing/whitespace of one address to mint a fresh per-email window per variant and
+        // amplify mail to a victim past the configured limit. Normalizing collapses every variant
+        // onto a single window.
+        String normalizedEmail = normalizeEmail(body.email);
+
         // Rate-limit BEFORE any user/client lookup, and key the email window by the SUBMITTED
-        // email hash regardless of whether it maps to a user. This keeps a 429 identical whether
-        // or not the account exists - a breach is the only thing that changes the response, never
-        // account existence. Unknown emails still fall through to the constant-shape 202 below.
+        // (normalized) email hash regardless of whether it maps to a user. This keeps a 429
+        // identical whether or not the account exists - a breach is the only thing that changes the
+        // response, never account existence. Unknown emails still fall through to the
+        // constant-shape 202 below.
         String clientIp = clientIp();
         MagicLinkRateLimiter.Decision limit = rateLimiter.check(
-                clientIp, body.email.trim(),
+                clientIp, normalizedEmail,
                 config.requestsPerMinutePerIp(), config.requestsPerMinutePerEmail());
         if (!limit.allowed()) {
             LOG.debugf("magic-link request rate-limited ip=%s", clientIp);
@@ -138,9 +148,9 @@ public final class MagicLinkResource {
                         body.clientId, body.redirectUri);
                 return accepted();
             }
-            UserModel user = session.users().getUserByEmail(realm, body.email.trim());
+            UserModel user = session.users().getUserByEmail(realm, normalizedEmail);
             if (user == null || !user.isEnabled()) {
-                LOG.debugf("magic-link request: no matching user for email=%s", redact(body.email));
+                LOG.debugf("magic-link request: no matching user for email=%s", redact(normalizedEmail));
                 return accepted();
             }
 
@@ -300,6 +310,17 @@ public final class MagicLinkResource {
     private String clientIp() {
         ClientConnection connection = session.getContext().getConnection();
         return connection != null ? connection.getRemoteAddr() : null;
+    }
+
+    /**
+     * Canonicalizes an email for the rate-limit key and the user lookup: trims surrounding
+     * whitespace and lower-cases with {@link Locale#ROOT} (no locale-specific casing surprises,
+     * e.g. the Turkish dotless-i). Matches Keycloak's case-insensitive email resolution so a
+     * single user maps to a single rate-limit window. Never returns null (callers have already
+     * rejected blank input). Package-private for unit testing.
+     */
+    static String normalizeEmail(String email) {
+        return email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
     }
 
     /** Mask local-part of an email for log lines. */

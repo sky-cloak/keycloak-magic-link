@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format loosely foll
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to the versioning policy
 in [VERSIONING.md](./VERSIONING.md).
 
+## [0.2.1]
+
+### Fixed
+- **Per-email rate-limit bypass via email casing.** The `POST /request` per-email window keyed on
+  the submitted email verbatim, but Keycloak resolves users case-insensitively, so varying the
+  casing or whitespace of one address (`Victim@Example.com`, `VICTIM@EXAMPLE.COM`, ...) minted a
+  fresh window per variant and let an attacker amplify magic-link mail to a victim past the
+  configured limit. The email is now normalized once (lower-case with `Locale.ROOT` + trim) and the
+  same normalized value is used for both the rate-limit key and the user lookup, collapsing every
+  variant onto a single window.
+
 ## [0.2.0]
 
 ### Added

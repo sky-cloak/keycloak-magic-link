@@ -4,6 +4,38 @@ All notable changes to this project are documented here. The format loosely foll
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to the versioning policy
 in [VERSIONING.md](./VERSIONING.md).
 
+## [0.3.0] - unreleased
+
+Breaking release. Magic-link is now a Keycloak login-flow authenticator plus an admin-authenticated
+issuance API, built on Keycloak action tokens; the previous unauthenticated `POST /request` endpoint
+is removed.
+
+### Added
+- **Login-flow authenticator (Mode A).** A standalone passwordless email step ("Magic Link
+  (Skycloak)") for the browser flow: the user enters their email on the Keycloak login page, gets a
+  link, and clicking it in the same browser completes the original authorization request with a
+  PKCE-bound code. Same-device is enforced by default via a `SKYCLOAK_MAGIC_DEVICE` cookie. Per-flow
+  `AuthenticatorConfig` tunes lifespan, same-device, auto-create-user, and rate limits.
+- **Admin issuance API (Mode B).** `POST /realms/{realm}/skycloak-magic-link` mints a link for a user
+  (requires the realm-management role `manage-users`, overridable per realm via the
+  `skycloak.magic-link.issue-role` attribute); it emails the link, or returns it when `send=false`.
+  `DELETE /realms/{realm}/skycloak-magic-link/{id}` revokes a pending link.
+- **Scanner-safe consume.** Under same-device the consume is single-step and scanner-safe by
+  construction (the device-cookie check precedes the single-use burn). Admin-issued and any-device
+  links carry no cookie, so they use a two-step confirm page (GET shows it without burning, POST
+  completes), which email security scanners that follow GET links cannot trip.
+- A successful sign-in sets `emailVerified=true` (clicking a link proves control of the address).
+
+### Changed
+- Authenticator configuration is per-flow (`AuthenticatorConfig`), not server-global SPI flags.
+
+### Removed
+- **The unauthenticated `POST /request` endpoint** and the `GET /consume` opaque-token endpoint.
+  Self-service is now the authenticator; programmatic issuance is the admin API.
+- The realm-resource id and path moved from `magic-link` to `skycloak-magic-link` (avoids colliding
+  with other magic-link extensions and namespaces our ids).
+- The global SPI configuration flags (`--spi-realm-restapi-extension-magic-link-*`).
+
 ## [0.2.1]
 
 ### Fixed

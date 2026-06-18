@@ -4,13 +4,16 @@ import java.net.URI;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 
 import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.ForbiddenException;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.NotAuthorizedException;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
@@ -18,7 +21,10 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriBuilder;
 
 import org.jboss.logging.Logger;
+import org.keycloak.OAuth2Constants;
+import org.keycloak.authentication.AuthenticationProcessor;
 import org.keycloak.common.ClientConnection;
+import org.keycloak.common.util.Time;
 import org.keycloak.email.EmailException;
 import org.keycloak.email.EmailSenderProvider;
 import org.keycloak.events.EventBuilder;
@@ -27,317 +33,357 @@ import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientSessionContext;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.protocol.oidc.utils.RedirectUtils;
+import org.keycloak.services.managers.AppAuthManager;
 import org.keycloak.services.managers.AuthenticationManager;
+import org.keycloak.services.managers.AuthenticationManager.AuthResult;
 import org.keycloak.services.managers.AuthenticationSessionManager;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.keycloak.util.JsonSerialization;
 
 /**
- * JAX-RS resource mounted at {@code /realms/{realm}/magic-link}.
+ * Admin REST API and Mode B consume mounted at {@code /realms/{realm}/skycloak-magic-link} (ADR-0002).
  *
  * <ul>
- *   <li>{@code GET  /health}  - public liveness counters.</li>
- *   <li>{@code POST /request} - body: {@code {email, clientId, redirectUri}}. Always returns
- *       {@code 202} regardless of whether the email belongs to a user (no account enumeration).</li>
- *   <li>{@code GET  /consume} - {@code ?token=...&clientId=...&redirectUri=...}. Signs the user
- *       in and {@code 302}-redirects to the requested URI with an OIDC code.</li>
+ *   <li>{@code POST /}        - issue a link for a user. Requires realm-management {@code manage-users}
+ *       (override per realm via the {@code skycloak.magic-link.issue-role} attribute). Emails the link,
+ *       or returns it when {@code send=false}.</li>
+ *   <li>{@code DELETE /{id}}  - revoke a pending link by the id returned at issue.</li>
+ *   <li>{@code GET  /consume} - confirm page for a Mode B link (does NOT burn the link).</li>
+ *   <li>{@code POST /consume} - burns the link and completes the login (302 with a code).</li>
+ *   <li>{@code GET  /health}  - public liveness.</li>
  * </ul>
+ *
+ * Mode B links carry no PKCE and no device cookie, so consume is two-step (ADR-0004): the emailed link
+ * is a GET that shows the confirm page without burning, and only the human POST completes. Keycloak's
+ * action-token endpoint is GET-only, so Mode B uses this resource's own consume rather than that
+ * handler (which serves the same-device single-step Mode A flow). The raw link and token are never
+ * logged. Issuance is account-takeover-equivalent, hence the admin gate.
  */
 public final class MagicLinkResource {
 
     private static final Logger LOG = Logger.getLogger(MagicLinkResource.class);
+    private static final String JSON = MediaType.APPLICATION_JSON;
+
+    static final String REALM_MANAGEMENT_CLIENT = "realm-management";
+    static final String DEFAULT_ISSUE_ROLE = "manage-users";
+    static final String ISSUE_ROLE_ATTRIBUTE = "skycloak.magic-link.issue-role";
+    static final int DEFAULT_LIFESPAN_SECONDS = 600;
+    static final int PER_EMAIL_PER_MINUTE = 10;
 
     private final KeycloakSession session;
-    private final MagicLinkConfig config;
-    private final MagicLinkTokenizer tokenizer;
-    private final MagicLinkRateLimiter rateLimiter;
 
-    public MagicLinkResource(KeycloakSession session, MagicLinkConfig config,
-                             MagicLinkTokenizer tokenizer, MagicLinkRateLimiter rateLimiter) {
+    public MagicLinkResource(KeycloakSession session) {
         this.session = session;
-        this.config = config;
-        this.tokenizer = tokenizer;
-        this.rateLimiter = rateLimiter;
     }
 
     @GET
     @Path("health")
-    @Produces(MediaType.APPLICATION_JSON)
+    @Produces(JSON)
     public Response health() {
-        // The token store is now Keycloak's cluster-wide SingleUseObjectProvider (Infinispan),
-        // which does not expose live counts, so the old per-node pending/issued/consumed counters
-        // are gone. We surface configuration and the store kind instead.
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("status", "ok");
         body.put("name", Version.NAME);
         body.put("version", Version.VERSION);
-        body.put("active", tokenizer != null);
-        body.put("tokenStore", "single-use-object");
-        body.put("tokenLifespanSeconds", config != null ? config.tokenLifespanSeconds() : 0);
-        body.put("requestsPerMinutePerIp", config != null ? config.requestsPerMinutePerIp() : 0);
-        body.put("requestsPerMinutePerEmail", config != null ? config.requestsPerMinutePerEmail() : 0);
+        body.put("active", true);
         return json(Response.Status.OK, write(body));
     }
 
     @POST
-    @Path("request")
-    @Consumes(MediaType.APPLICATION_JSON)
-    @Produces(MediaType.APPLICATION_JSON)
-    public Response request(String rawBody) {
-        if (tokenizer == null) {
-            return json(Response.Status.SERVICE_UNAVAILABLE, "{\"error\":\"magic-link not initialized\"}");
-        }
+    @Consumes(JSON)
+    @Produces(JSON)
+    public Response issue(String rawBody) {
+        RealmModel realm = realm();
+        requireIssueRole(realm, authenticate(realm));
 
-        MagicLinkRequest body;
+        IssueRequest req;
         try {
-            body = JsonSerialization.readValue(rawBody == null ? "{}" : rawBody, MagicLinkRequest.class);
+            req = JsonSerialization.readValue(rawBody == null ? "{}" : rawBody, IssueRequest.class);
         } catch (Exception e) {
-            return json(Response.Status.BAD_REQUEST, "{\"error\":\"invalid_request\"}");
+            return json(Response.Status.BAD_REQUEST, err("invalid_request", "malformed JSON body"));
         }
-        if (body == null || body.email == null || body.email.isBlank()
-                || body.clientId == null || body.clientId.isBlank()
-                || body.redirectUri == null || body.redirectUri.isBlank()) {
+        if (req == null || blank(req.clientId) || blank(req.redirectUri)) {
             return json(Response.Status.BAD_REQUEST,
-                    "{\"error\":\"invalid_request\","
-                            + "\"error_description\":\"email, clientId and redirectUri are required\"}");
+                    err("invalid_request", "clientId and redirectUri are required"));
         }
 
-        RealmModel realm = session.getContext().getRealm();
-        if (realm == null) {
-            return json(Response.Status.NOT_FOUND, "{\"error\":\"realm_not_found\"}");
+        UserModel user = resolveUser(realm, req);
+        if (user == null) {
+            return json(Response.Status.NOT_FOUND, err("user_not_found", "no user matched the identifier"));
+        }
+        ClientModel client = realm.getClientByClientId(req.clientId);
+        if (client == null || !client.isEnabled()) {
+            return json(Response.Status.BAD_REQUEST, err("unknown_client", "clientId is unknown or disabled"));
+        }
+        String validatedRedirect = RedirectUtils.verifyRedirectUri(session, req.redirectUri, client);
+        if (validatedRedirect == null) {
+            return json(Response.Status.BAD_REQUEST,
+                    err("invalid_redirect_uri", "redirectUri is not registered for the client"));
         }
 
-        // Normalize the email once (lower-case + trim) and use the SAME normalized value for the
-        // rate-limit key and the user lookup below. Keycloak resolves users by email
-        // case-insensitively (it lower-cases the lookup), so without this an attacker could vary
-        // the casing/whitespace of one address to mint a fresh per-email window per variant and
-        // amplify mail to a victim past the configured limit. Normalizing collapses every variant
-        // onto a single window.
-        String normalizedEmail = normalizeEmail(body.email);
-
-        // Rate-limit BEFORE any user/client lookup, and key the email window by the SUBMITTED
-        // (normalized) email hash regardless of whether it maps to a user. This keeps a 429
-        // identical whether or not the account exists - a breach is the only thing that changes the
-        // response, never account existence. Unknown emails still fall through to the
-        // constant-shape 202 below.
-        String clientIp = clientIp();
-        MagicLinkRateLimiter.Decision limit = rateLimiter.check(
-                clientIp, normalizedEmail,
-                config.requestsPerMinutePerIp(), config.requestsPerMinutePerEmail());
-        if (!limit.allowed()) {
-            LOG.debugf("magic-link request rate-limited ip=%s", clientIp);
-            return tooManyRequests(limit.retryAfterSeconds());
-        }
-
-        // Best-effort lookup and issuance. Failures are logged but the response is always
-        // 202: the caller must not be able to distinguish "user exists" from "user does not".
-        try {
-            ClientModel client = realm.getClientByClientId(body.clientId);
-            if (client == null || !client.isEnabled()) {
-                LOG.debugf("magic-link request: unknown or disabled client_id=%s", body.clientId);
-                return accepted();
+        boolean send = req.send == null || req.send; // default true
+        if (send) {
+            if (blank(user.getEmail())) {
+                return json(Response.Status.CONFLICT, err("user_has_no_email", "the user has no email address"));
             }
-            String validatedRedirect = RedirectUtils.verifyRedirectUri(session, body.redirectUri, client);
-            if (validatedRedirect == null) {
-                LOG.debugf("magic-link request: redirect_uri rejected for client_id=%s uri=%s",
-                        body.clientId, body.redirectUri);
-                return accepted();
+            // Defense in depth: cap repeated sends per target email even from a trusted caller.
+            MagicLinkRateLimiter.Decision rl = new MagicLinkRateLimiter(session)
+                    .check(null, normalize(user.getEmail()), 0, PER_EMAIL_PER_MINUTE);
+            if (!rl.allowed()) {
+                return Response.status(429)
+                        .header("Retry-After", String.valueOf(rl.retryAfterSeconds()))
+                        .type(JSON).entity(err("rate_limited", "too many links for this user; retry later"))
+                        .build();
             }
-            UserModel user = session.users().getUserByEmail(realm, normalizedEmail);
-            if (user == null || !user.isEnabled()) {
-                LOG.debugf("magic-link request: no matching user for email=%s", redact(normalizedEmail));
-                return accepted();
-            }
-
-            String token = tokenizer.issue(
-                    user.getId(), body.clientId, validatedRedirect, config.tokenLifespanSeconds());
-
-            String link = buildConsumeUrl(token, body.clientId, validatedRedirect);
-            sendEmail(realm, user, link);
-            LOG.infof("magic-link issued for user=%s client=%s", user.getId(), body.clientId);
-        } catch (Exception e) {
-            LOG.warnf("magic-link request failed: %s", e.getMessage());
         }
-        return accepted();
+
+        int lifespan = (req.expirationSeconds != null && req.expirationSeconds > 0)
+                ? req.expirationSeconds : DEFAULT_LIFESPAN_SECONDS;
+        String consumeId = UUID.randomUUID().toString();
+
+        // Mode B token: no device nonce (cross-device, admin-issued) and no PKCE (no originating
+        // client request). Consume is this resource's own two-step GET/POST below.
+        MagicLinkActionToken token = new MagicLinkActionToken(
+                user.getId(), Time.currentTime() + lifespan, req.clientId,
+                validatedRedirect, req.scope, req.state, null, null, null, null, null, consumeId);
+
+        MagicLinkPendingStore.register(session, consumeId, lifespan, user.getId(), req.clientId);
+
+        String link = buildConsumeLink(realm, token);
+
+        if (send) {
+            try {
+                sendEmail(realm, user.getEmail(), link, clientName(client));
+            } catch (Exception e) {
+                LOG.warnf("magic-link admin issue: email send failed id=%s: %s", consumeId, e.getMessage());
+                return json(Response.Status.BAD_GATEWAY, err("email_send_failed", "the link could not be emailed"));
+            }
+            LOG.infof("magic-link admin issue: emailed user=%s client=%s id=%s", user.getId(), req.clientId, consumeId);
+        } else {
+            LOG.infof("magic-link admin issue: returned-to-caller user=%s client=%s id=%s",
+                    user.getId(), req.clientId, consumeId);
+        }
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", consumeId);
+        body.put("expiresAt", Time.currentTime() + lifespan);
+        if (!send) {
+            body.put("link", link); // returned only when the caller delivers it themselves
+        }
+        return json(Response.Status.CREATED, write(body));
     }
 
+    @DELETE
+    @Path("{id}")
+    @Produces(JSON)
+    public Response revoke(@PathParam("id") String id) {
+        RealmModel realm = realm();
+        requireIssueRole(realm, authenticate(realm));
+        if (blank(id) || !MagicLinkPendingStore.revoke(session, id)) {
+            return json(Response.Status.NOT_FOUND, err("not_found", "no pending link with that id"));
+        }
+        LOG.infof("magic-link admin revoke: id=%s", id);
+        return Response.noContent().build();
+    }
+
+    /** Confirm page for a Mode B link. A GET (incl. an email scanner prefetch) never burns the link. */
     @GET
     @Path("consume")
-    public Response consume(@QueryParam("token") String token,
-                            @QueryParam("clientId") String clientId,
-                            @QueryParam("redirectUri") String redirectUri) {
-        if (tokenizer == null) {
-            return json(Response.Status.SERVICE_UNAVAILABLE, "{\"error\":\"magic-link not initialized\"}");
+    @Produces(MediaType.TEXT_HTML)
+    public Response consumeConfirm(@QueryParam("key") String key) {
+        MagicLinkActionToken token = decode(key);
+        if (token == null) {
+            return htmlError(Response.Status.BAD_REQUEST,
+                    "This sign-in link is invalid, has expired, or has already been used.");
         }
-        if (token == null || token.isBlank()) {
-            return json(Response.Status.BAD_REQUEST, "{\"error\":\"missing_token\"}");
-        }
+        RealmModel realm = realm();
+        ClientModel client = realm.getClientByClientId(token.getIssuedFor());
+        String action = session.getContext().getUri().getRequestUri().toString();
+        String html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Sign in</title></head>"
+                + "<body style=\"font-family:sans-serif;max-width:32rem;margin:4rem auto;text-align:center\">"
+                + "<p>Continue signing in to <strong>" + escape(clientName(client)) + "</strong>?</p>"
+                + "<form method=\"POST\" action=\"" + escape(action) + "\">"
+                + "<button type=\"submit\" style=\"font-size:1rem;padding:.6rem 1.4rem;cursor:pointer\">"
+                + "Sign in</button></form></body></html>";
+        return Response.ok(html, MediaType.TEXT_HTML).build();
+    }
 
-        Optional<MagicLinkTokenizer.Entry> maybe = tokenizer.consume(token);
-        if (maybe.isEmpty()) {
-            LOG.debug("magic-link consume: token unknown or expired");
-            return json(Response.Status.UNAUTHORIZED,
-                    "{\"error\":\"invalid_token\","
-                            + "\"error_description\":\"the magic link is invalid, expired, or has already been used\"}");
+    /** Burns the link and completes the login. Only reached by the human POST from the confirm page. */
+    @POST
+    @Path("consume")
+    public Response consumeComplete(@QueryParam("key") String key) {
+        MagicLinkActionToken token = decode(key);
+        if (token == null || !MagicLinkPendingStore.consume(session, token.getConsumeId())) {
+            return htmlError(Response.Status.BAD_REQUEST,
+                    "This sign-in link is invalid, has expired, or has already been used.");
         }
-        MagicLinkTokenizer.Entry entry = maybe.get();
-
-        // Caller-supplied clientId / redirectUri are optional - the token already binds them.
-        // If supplied, they must match the bound values exactly to prevent open redirects.
-        if (clientId != null && !clientId.isBlank() && !clientId.equals(entry.clientId())) {
-            return json(Response.Status.BAD_REQUEST, "{\"error\":\"clientId_mismatch\"}");
-        }
-        if (redirectUri != null && !redirectUri.isBlank() && !redirectUri.equals(entry.redirectUri())) {
-            return json(Response.Status.BAD_REQUEST, "{\"error\":\"redirectUri_mismatch\"}");
-        }
-
-        RealmModel realm = session.getContext().getRealm();
-        if (realm == null) {
-            return json(Response.Status.NOT_FOUND, "{\"error\":\"realm_not_found\"}");
-        }
-        ClientModel client = realm.getClientByClientId(entry.clientId());
+        RealmModel realm = realm();
+        ClientModel client = realm.getClientByClientId(token.getIssuedFor());
         if (client == null || !client.isEnabled()) {
-            return json(Response.Status.BAD_REQUEST, "{\"error\":\"unknown_client\"}");
+            return htmlError(Response.Status.BAD_REQUEST, "The application is unknown or disabled.");
         }
-        UserModel user = session.users().getUserById(realm, entry.userId());
+        UserModel user = session.users().getUserById(realm, token.getUserId());
         if (user == null || !user.isEnabled()) {
-            return json(Response.Status.UNAUTHORIZED, "{\"error\":\"unknown_user\"}");
+            return htmlError(Response.Status.UNAUTHORIZED, "The account is unavailable.");
         }
-
-        return completeLogin(realm, client, user, entry.redirectUri());
+        user.setEmailVerified(true); // clicking a link proves control of the address (ADR-0004)
+        return completeLogin(realm, client, user, token);
     }
 
     /**
-     * Builds a fresh authentication session, attaches a new user session as authenticated, and
-     * returns an OIDC redirect to the bound redirect URI carrying an authorization code.
+     * Verifies the action-token JWT (signature + expiry) and that it is a Mode B token. Returns null
+     * when invalid. A same-device (Mode A) token carries a device nonce and MUST be consumed via the
+     * action-token handler, which enforces the device cookie; accepting one at this cookieless
+     * endpoint would let an intercepted Mode A link bypass same-device.
      */
-    private Response completeLogin(RealmModel realm, ClientModel client, UserModel user, String redirectUri) {
+    private MagicLinkActionToken decode(String key) {
+        if (blank(key)) {
+            return null;
+        }
+        try {
+            MagicLinkActionToken token = session.tokens().decode(key, MagicLinkActionToken.class);
+            if (token == null || !token.isActive() || token.getDeviceNonce() != null) {
+                return null;
+            }
+            return token;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Fresh authentication session + user session, then OIDC's success path (issues the code). */
+    private Response completeLogin(RealmModel realm, ClientModel client, UserModel user, MagicLinkActionToken token) {
         ClientConnection connection = session.getContext().getConnection();
-        AuthenticationSessionManager sessionManager = new AuthenticationSessionManager(session);
-        RootAuthenticationSessionModel root = sessionManager.createAuthenticationSession(realm, true);
+        AuthenticationSessionManager mgr = new AuthenticationSessionManager(session);
+        RootAuthenticationSessionModel root = mgr.createAuthenticationSession(realm, true);
         AuthenticationSessionModel authSession = root.createAuthenticationSession(client);
 
+        String redirect = RedirectUtils.verifyRedirectUri(session, token.getRedirectUri(), client);
+        if (redirect == null) {
+            return htmlError(Response.Status.BAD_REQUEST, "The return URL is not allowed for this application.");
+        }
         authSession.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
         authSession.setAction(AuthenticationSessionModel.Action.AUTHENTICATE.name());
         authSession.setClientNote(OIDCLoginProtocol.RESPONSE_TYPE_PARAM, "code");
-        authSession.setClientNote(OIDCLoginProtocol.REDIRECT_URI_PARAM, redirectUri);
+        authSession.setClientNote(OIDCLoginProtocol.REDIRECT_URI_PARAM, token.getRedirectUri());
         authSession.setClientNote(OIDCLoginProtocol.ISSUER,
                 session.getContext().getUri().getBaseUri().toString() + "realms/" + realm.getName());
-        authSession.setRedirectUri(redirectUri);
+        authSession.setRedirectUri(redirect);
+        if (token.getState() != null) {
+            authSession.setClientNote(OIDCLoginProtocol.STATE_PARAM, token.getState());
+        }
+        if (token.getNonce() != null) {
+            authSession.setClientNote(OIDCLoginProtocol.NONCE_PARAM, token.getNonce());
+        }
+        if (token.getScope() != null) {
+            authSession.setClientNote(OAuth2Constants.SCOPE, token.getScope());
+        }
         authSession.setAuthenticatedUser(user);
 
         EventBuilder event = new EventBuilder(realm, session, connection)
-                .event(EventType.LOGIN)
-                .client(client)
-                .user(user)
-                .detail("auth_method", "magic-link");
+                .event(EventType.LOGIN).client(client).user(user)
+                .detail("auth_method", MagicLinkActionToken.TOKEN_TYPE);
 
         UserSessionModel userSession = session.sessions().createUserSession(
-                authSession.getParentSession().getId(),
-                realm,
-                user,
-                user.getUsername(),
-                connection != null ? connection.getRemoteAddr() : null,
-                "magic-link",
-                false,
-                null,
-                null,
-                UserSessionModel.SessionPersistenceState.PERSISTENT);
+                authSession.getParentSession().getId(), realm, user, user.getUsername(),
+                connection != null ? connection.getRemoteAddr() : null, MagicLinkActionToken.TOKEN_TYPE,
+                false, null, null, UserSessionModel.SessionPersistenceState.PERSISTENT);
 
-        // Attach the auth session to the user session and produce a client session context.
-        ClientSessionContext clientSessionCtx = org.keycloak.authentication.AuthenticationProcessor.attachSession(
-                authSession, userSession, session, realm, connection, event);
+        ClientSessionContext clientSessionCtx =
+                AuthenticationProcessor.attachSession(authSession, userSession, session, realm, connection, event);
 
-        // Hand off to OIDC's success path - this issues the code and returns the 302.
         Response response = AuthenticationManager.redirectAfterSuccessfulFlow(
                 session, realm, userSession, clientSessionCtx,
-                session.getContext().getHttpRequest(), session.getContext().getUri(),
-                connection, event, authSession);
-
+                session.getContext().getHttpRequest(), session.getContext().getUri(), connection, event, authSession);
         event.success();
         return response;
     }
 
-    private String buildConsumeUrl(String token, String clientId, String redirectUri) {
+    private AuthResult authenticate(RealmModel realm) {
+        AuthResult auth = new AppAuthManager.BearerTokenAuthenticator(session)
+                .setRealm(realm)
+                .setConnection(session.getContext().getConnection())
+                .setHeaders(session.getContext().getRequestHeaders())
+                .setUriInfo(session.getContext().getUri())
+                .authenticate();
+        if (auth == null) {
+            throw new NotAuthorizedException("Bearer");
+        }
+        return auth;
+    }
+
+    private void requireIssueRole(RealmModel realm, AuthResult auth) {
+        String roleName = realm.getAttribute(ISSUE_ROLE_ATTRIBUTE);
+        if (roleName == null || roleName.isBlank()) {
+            roleName = DEFAULT_ISSUE_ROLE;
+        }
+        ClientModel rm = realm.getClientByClientId(REALM_MANAGEMENT_CLIENT);
+        RoleModel role = rm == null ? null : rm.getRole(roleName);
+        if (role == null || auth.getUser() == null || !auth.getUser().hasRole(role)) {
+            throw new ForbiddenException("requires realm-management role: " + roleName);
+        }
+    }
+
+    private UserModel resolveUser(RealmModel realm, IssueRequest req) {
+        if (!blank(req.userId)) {
+            return session.users().getUserById(realm, req.userId);
+        }
+        if (!blank(req.email)) {
+            return session.users().getUserByEmail(realm, normalize(req.email));
+        }
+        if (!blank(req.username)) {
+            return session.users().getUserByUsername(realm, req.username);
+        }
+        return null;
+    }
+
+    private String buildConsumeLink(RealmModel realm, MagicLinkActionToken token) {
         URI base = session.getContext().getUri().getBaseUri();
-        String realmName = session.getContext().getRealm().getName();
+        String tokenString = token.serialize(session, realm, session.getContext().getUri());
         return UriBuilder.fromUri(base)
-                .path("realms").path(realmName).path("magic-link").path("consume")
-                .queryParam("token", token)
-                .queryParam("clientId", clientId)
-                .queryParam("redirectUri", redirectUri)
+                .path("realms").path(realm.getName()).path(MagicLinkResourceProviderFactory.ID).path("consume")
+                .queryParam("key", tokenString)
                 .build()
                 .toString();
     }
 
-    private void sendEmail(RealmModel realm, UserModel user, String link) {
-        Map<String, String> smtpConfig = realm.getSmtpConfig();
-        if (smtpConfig == null || smtpConfig.isEmpty()) {
-            LOG.warnf("realm %s has no SMTP configured - cannot deliver magic link", realm.getName());
-            return;
-        }
-        if (user.getEmail() == null || user.getEmail().isBlank()) {
-            LOG.warnf("user %s has no email - cannot deliver magic link", user.getId());
-            return;
-        }
-
-        Map<String, String> effective = new LinkedHashMap<>(smtpConfig);
-        if (config.fromEmailOverride() != null) {
-            effective.put("from", config.fromEmailOverride());
-        }
-
-        String subject = config.subjectTemplate();
-        String body = config.renderBody(link);
-
+    private void sendEmail(RealmModel realm, String to, String link, String clientName) throws EmailException {
+        String subject = "Your sign-in link";
+        String text = "Sign in to " + clientName + ":\n\n" + link
+                + "\n\nThis link expires shortly and can be used once.\n";
+        String html = "<p>Sign in to <strong>" + escape(clientName) + "</strong>:</p>"
+                + "<p><a href=\"" + escape(link) + "\">Sign in</a></p>"
+                + "<p>This link expires shortly and can be used once.</p>";
         EmailSenderProvider sender = session.getProvider(EmailSenderProvider.class);
-        if (sender == null) {
-            LOG.warn("no EmailSenderProvider available; cannot deliver magic link");
-            return;
-        }
-        try {
-            sender.send(effective, user.getEmail(), subject, body, null);
-        } catch (EmailException e) {
-            LOG.warnf("failed to send magic-link email to user=%s: %s", user.getId(), e.getMessage());
-        }
+        sender.send(realm.getSmtpConfig(), to, subject, text, html);
     }
 
-    /** Resolves the client IP via Keycloak's connection (already proxy-aware when configured). */
-    private String clientIp() {
-        ClientConnection connection = session.getContext().getConnection();
-        return connection != null ? connection.getRemoteAddr() : null;
+    private RealmModel realm() {
+        RealmModel realm = session.getContext().getRealm();
+        if (realm == null) {
+            throw new jakarta.ws.rs.NotFoundException("realm not found");
+        }
+        return realm;
     }
 
-    /**
-     * Canonicalizes an email for the rate-limit key and the user lookup: trims surrounding
-     * whitespace and lower-cases with {@link Locale#ROOT} (no locale-specific casing surprises,
-     * e.g. the Turkish dotless-i). Matches Keycloak's case-insensitive email resolution so a
-     * single user maps to a single rate-limit window. Never returns null (callers have already
-     * rejected blank input). Package-private for unit testing.
-     */
-    static String normalizeEmail(String email) {
+    private static String clientName(ClientModel client) {
+        if (client == null) {
+            return "the application";
+        }
+        return client.getName() != null && !client.getName().isBlank() ? client.getName() : client.getClientId();
+    }
+
+    private static String normalize(String email) {
         return email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
     }
 
-    /** Mask local-part of an email for log lines. */
-    private static String redact(String email) {
-        if (email == null) {
-            return null;
-        }
-        int at = email.indexOf('@');
-        if (at <= 1) {
-            return "***";
-        }
-        return email.charAt(0) + "***" + email.substring(at);
-    }
-
-    @SuppressWarnings("unused") // referenced via reflective ID for debug
-    private static String newRequestId() {
-        return UUID.randomUUID().toString();
+    private static boolean blank(String s) {
+        return s == null || s.isBlank();
     }
 
     private static String write(Object value) {
@@ -348,31 +394,37 @@ public final class MagicLinkResource {
         }
     }
 
+    private static String err(String code, String description) {
+        return "{\"error\":\"" + code + "\",\"error_description\":\"" + escape(description) + "\"}";
+    }
+
     private static Response json(Response.Status status, String body) {
-        return Response.status(status).type(MediaType.APPLICATION_JSON).entity(body).build();
+        return Response.status(status).type(JSON).entity(body).build();
     }
 
-    private static Response accepted() {
-        return Response.status(Response.Status.ACCEPTED)
-                .type(MediaType.APPLICATION_JSON)
-                .entity("{\"status\":\"accepted\"}")
+    private static Response htmlError(Response.Status status, String message) {
+        return Response.status(status).type(MediaType.TEXT_HTML)
+                .entity("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Sign-in link</title></head>"
+                        + "<body style=\"font-family:sans-serif;max-width:32rem;margin:4rem auto\"><p>"
+                        + escape(message) + "</p></body></html>")
                 .build();
     }
 
-    private static Response tooManyRequests(long retryAfterSeconds) {
-        return Response.status(429)
-                .header("Retry-After", String.valueOf(retryAfterSeconds))
-                .type(MediaType.APPLICATION_JSON)
-                .entity("{\"error\":\"rate_limited\","
-                        + "\"error_description\":\"too many magic-link requests; retry later\","
-                        + "\"retry_after\":" + retryAfterSeconds + "}")
-                .build();
+    private static String escape(String s) {
+        return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace("\"", "&quot;");
     }
 
-    /** Wire format for {@code POST /request}. */
-    public static final class MagicLinkRequest {
+    /** Wire format for {@code POST /skycloak-magic-link}. */
+    public static final class IssueRequest {
+        public String userId;
         public String email;
+        public String username;
         public String clientId;
         public String redirectUri;
+        public Integer expirationSeconds;
+        public Boolean send;
+        public String scope;
+        public String state;
     }
 }

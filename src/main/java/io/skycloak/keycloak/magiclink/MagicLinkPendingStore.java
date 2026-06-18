@@ -55,4 +55,13 @@ final class MagicLinkPendingStore {
         Map<String, String> removed = store.remove(KEY_PREFIX + consumeId);
         return removed != null;
     }
+
+    /**
+     * Revokes a pending link by id (admin action, Mode B). Mechanically identical to a consume:
+     * the entry is removed, so the next click finds nothing and fails. Returns {@code true} if an
+     * entry was present and removed, {@code false} if it was already used, expired, or unknown.
+     */
+    static boolean revoke(KeycloakSession session, String consumeId) {
+        return consume(session, consumeId);
+    }
 }

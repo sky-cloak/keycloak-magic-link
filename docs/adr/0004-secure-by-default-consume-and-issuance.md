@@ -12,18 +12,21 @@ a well-meaning "simplification" that reopens a hole.
 - **Identical output whether or not the account exists.** No "account not found"
   message; the unknown-email path renders the same "check your email" page and sends
   nothing. Keeps the login box from becoming an account-enumeration oracle.
-- **Scanner-safe single-use consume (revised in Phase 1).** Under same-device (the
-  default), consume is single-step and scanner-safe by construction: the same-device
-  cookie check runs before the single-use burn, so an email security scanner (Safe Links,
-  Mimecast, Proofpoint) that prefetches the link has no device cookie, fails the check,
-  and returns a 403 without burning the registry entry; the genuine same-browser click
-  then burns it once and completes. No confirm page is needed while same-device is on. The
-  originally-planned two-step confirm page (GET shows a "Sign in?" page, POST burns and
-  completes) proved both redundant here and brittle to render from an action-token
-  handler, so it was dropped as the default. It is retained on paper as the compensating
-  control for the opt-in any-device mode, where there is no device cookie to gate on and a
-  single-step link would otherwise be scanner-burnable: any-device must not be enabled
-  until that control (or the Q6 confirmation code) ships.
+- **Scanner-safe single-use consume (revised across Phase 1 and Phase 2).** Under
+  same-device (the default), consume is single-step and scanner-safe by construction: the
+  same-device cookie check runs before the single-use burn, so a scanner that prefetches
+  the link has no device cookie, fails the check, and returns a 403 without burning the
+  registry entry; the genuine same-browser click then burns it once and completes. The
+  no-cookie path (Mode B admin-issued links, which are cross-device, and the basis for any
+  opt-in any-device Mode A) instead uses a two-step confirm: GET shows a "Sign in?" page
+  without burning, POST burns and completes, so a scanner's prefetch GET is harmless. That
+  two-step lives on the resource's own GET/POST `/skycloak-magic-link/consume`, not on
+  Keycloak's action-token endpoint, because that endpoint is GET-only (a POST to it 404s).
+- **Cross-path guard (security-critical).** The cookieless resource `/consume` must reject
+  any token that carries a device nonce (a same-device Mode A token). Without this, an
+  intercepted Mode A link could be replayed against the cookieless endpoint and bypass
+  same-device entirely. Same-device tokens are consumable only via the action-token handler
+  that checks the cookie; do not loosen this.
 - **Single-use, short-lived.** Atomic remove-on-consume in the registry, 10-minute
   default lifespan (per-flow configurable). Standard replay and exposure-window control.
 - **Issuance rate-limiting.** The authenticator send action is limited per client IP and

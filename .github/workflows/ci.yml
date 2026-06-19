@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        keycloak: ["24.0.5", "25.0.6", "26.0.7"]
+        keycloak: ["25.0.6", "26.0.7", "26.6.3"]
     steps:
       - uses: actions/checkout@v6
 
@@ -27,8 +27,13 @@ jobs:
       - name: Build and unit-test (Keycloak ${{ matrix.keycloak }})
         run: mvn -B -Dkeycloak.version=${{ matrix.keycloak }} package
 
-      - name: Integration test against a real Keycloak ${{ matrix.keycloak }}
-        run: ci/integration-test.sh ${{ matrix.keycloak }}
+      - name: Integration tests against a real Keycloak ${{ matrix.keycloak }}
+        run: |
+          ci/magic-link-authenticator-test.sh ${{ matrix.keycloak }}
+          ci/magic-link-admin-test.sh ${{ matrix.keycloak }}
+          ci/magic-link-crosspath-test.sh ${{ matrix.keycloak }}
+          ci/magic-link-events-test.sh ${{ matrix.keycloak }}
+          ci/magic-link-modea-extra-test.sh ${{ matrix.keycloak }}
 
       - name: Upload provider jar
         if: matrix.keycloak == '26.0.7'

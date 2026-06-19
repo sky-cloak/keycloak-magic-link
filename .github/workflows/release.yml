@@ -37,10 +37,10 @@ jobs:
       - name: Build release JAR against Keycloak 26.0.7
         run: mvn -B -Dkeycloak.version=26.0.7 package
 
-      - name: Sanity-check against Keycloak 24.0.5 and 25.0.6
+      - name: Sanity-check against Keycloak 25.0.6 and 26.6.3
         run: |
-          mvn -B -Dkeycloak.version=24.0.5 clean compile
           mvn -B -Dkeycloak.version=25.0.6 clean compile
+          mvn -B -Dkeycloak.version=26.6.3 clean compile
           # Rebuild the artifact we ship (KC 26.0.7 is the primary target).
           mvn -B -Dkeycloak.version=26.0.7 package -DskipTests
 
@@ -64,7 +64,7 @@ jobs:
             echo
             echo "## Keycloak compatibility"
             echo
-            echo "Built against **Keycloak 26.0.7**. CI validates the same code against **24.0.5, 25.0.6, and 26.0.7** on every push."
+            echo "Built against **Keycloak 26.0.7**. CI validates the same code against **25.0.6, 26.0.7, and 26.6.3** on every push."
             echo
             if [[ -n "$PREV_TAG" ]]; then
               echo "## Changes since ${PREV_TAG}"

@@ -108,7 +108,10 @@ public final class MagicLinkAuthenticator implements Authenticator {
         int lifespan = config.tokenLifespanSeconds();
 
         String consumeId = UUID.randomUUID().toString();
-        String deviceNonce = config.sameDevice() ? UUID.randomUUID().toString() : null;
+        // Same-device is always enforced in v0.3.0: the link completes only in the browser that
+        // requested it. Any-device, with the scanner-safe two-step it would require, is a deferred
+        // follow-up, so the device nonce is always issued and the consume always checks the cookie.
+        String deviceNonce = UUID.randomUUID().toString();
 
         MagicLinkActionToken token = new MagicLinkActionToken(
                 user.getId(),
@@ -136,19 +139,19 @@ public final class MagicLinkAuthenticator implements Authenticator {
                 .build(realm.getName())
                 .toString();
 
-        if (deviceNonce != null) {
-            boolean secure = "https".equalsIgnoreCase(baseUri.getScheme());
-            NewCookie cookie = new NewCookie.Builder(MagicLinkActionTokenHandler.DEVICE_COOKIE)
-                    .value(deviceNonce)
-                    .path("/realms/" + realm.getName())
-                    .version(1)
-                    .httpOnly(true)
-                    .secure(secure)
-                    .maxAge(lifespan)
-                    .sameSite(NewCookie.SameSite.LAX) // Lax (not Strict) so the email-client click sends it
-                    .build();
-            session.getContext().getHttpResponse().setCookieIfAbsent(cookie);
-        }
+        // Same-device cookie: bound to this browser, re-checked at consume. Lax (not Strict) so the
+        // top-level GET from the email client still sends it.
+        boolean secure = "https".equalsIgnoreCase(baseUri.getScheme());
+        NewCookie cookie = new NewCookie.Builder(MagicLinkActionTokenHandler.DEVICE_COOKIE)
+                .value(deviceNonce)
+                .path("/realms/" + realm.getName())
+                .version(1)
+                .httpOnly(true)
+                .secure(secure)
+                .maxAge(lifespan)
+                .sameSite(NewCookie.SameSite.LAX)
+                .build();
+        session.getContext().getHttpResponse().setCookieIfAbsent(cookie);
 
         try {
             MagicLinkEmail.send(session, realm, user, link, clientDisplayName(session));
@@ -156,8 +159,7 @@ public final class MagicLinkAuthenticator implements Authenticator {
             // Anti-enumeration: never surface send failures to the caller. Log and move on.
             LOG.warnf("magic-link: email send failed: %s", e.getMessage());
         }
-        LOG.infof("magic-link: issued link user=%s client=%s sameDevice=%b", user.getId(), clientId,
-                deviceNonce != null);
+        LOG.infof("magic-link: issued link user=%s client=%s", user.getId(), clientId);
     }
 
     private static String clientDisplayName(KeycloakSession session) {

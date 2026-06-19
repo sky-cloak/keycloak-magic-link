@@ -67,17 +67,25 @@ public final class MagicLinkActionTokenHandler
         AuthenticationSessionModel authSession = ctx.getAuthenticationSession();
         ClientModel client = authSession.getClient();
 
+        // Every Mode A link carries a device nonce. A token without one is a Mode B / cookieless
+        // token that must be consumed at the resource's own /consume (which conversely rejects
+        // device-nonce tokens), keeping the two consume paths mutually exclusive.
+        String deviceNonce = token.getDeviceNonce();
+        if (deviceNonce == null) {
+            ctx.getEvent().event(EventType.LOGIN_ERROR).detail("magic_link_error", "wrong_endpoint")
+                    .error(Errors.INVALID_TOKEN);
+            return htmlError(Response.Status.BAD_REQUEST,
+                    "This sign-in link is invalid, has expired, or has already been used.");
+        }
         // Same-device: the cookie set when the link was issued must be present and match. A scanner
         // (no cookie) fails here and the registry entry is left intact for the genuine click.
-        if (token.getDeviceNonce() != null) {
-            String cookieVal = readCookie(ctx, DEVICE_COOKIE);
-            if (cookieVal == null || !cookieVal.equals(token.getDeviceNonce())) {
-                LOG.warnf("magic-link same-device check failed (cookiePresent=%b)", cookieVal != null);
-                ctx.getEvent().event(EventType.LOGIN_ERROR).detail("magic_link_error", "wrong_device")
-                        .error(Errors.INVALID_TOKEN);
-                return htmlError(Response.Status.FORBIDDEN,
-                        "Open this sign-in link in the same browser where you started signing in.");
-            }
+        String cookieVal = readCookie(ctx, DEVICE_COOKIE);
+        if (cookieVal == null || !cookieVal.equals(deviceNonce)) {
+            LOG.warnf("magic-link same-device check failed (cookiePresent=%b)", cookieVal != null);
+            ctx.getEvent().event(EventType.LOGIN_ERROR).detail("magic_link_error", "wrong_device")
+                    .error(Errors.INVALID_TOKEN);
+            return htmlError(Response.Status.FORBIDDEN,
+                    "Open this sign-in link in the same browser where you started signing in.");
         }
 
         // Single use: atomically burn the registry entry. A replay, expiry, or admin revoke fails.
@@ -98,6 +106,15 @@ public final class MagicLinkActionTokenHandler
         }
         authSession.setUserSessionNote("login_method", MagicLinkActionToken.TOKEN_TYPE);
         ctx.getEvent().detail(Details.AUTH_METHOD, MagicLinkActionToken.TOKEN_TYPE);
+        // Record a magic-link-tagged success in the event log so a successful Mode A consume is
+        // auditable as magic-link; the flow's own LOGIN event carries auth_method=openid-connect.
+        // Cloned so it does not disturb the event the flow uses to fire that LOGIN (no double LOGIN).
+        ctx.getEvent().clone()
+                .event(EventType.EXECUTE_ACTION_TOKEN)
+                .detail(Details.AUTH_METHOD, MagicLinkActionToken.TOKEN_TYPE)
+                .user(user)
+                .client(client)
+                .success();
 
         String nextAction = AuthenticationManager.nextRequiredAction(
                 ctx.getSession(), authSession, ctx.getRequest(), ctx.getEvent());

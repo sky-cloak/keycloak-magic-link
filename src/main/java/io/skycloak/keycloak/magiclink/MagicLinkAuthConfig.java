@@ -10,13 +10,11 @@ import org.keycloak.models.AuthenticatorConfigModel;
 final class MagicLinkAuthConfig {
 
     static final String TOKEN_LIFESPAN_SECONDS = "token-lifespan-seconds";
-    static final String SAME_DEVICE = "same-device";
     static final String AUTO_CREATE_USER = "auto-create-user";
     static final String PER_IP = "requests-per-minute-per-ip";
     static final String PER_EMAIL = "requests-per-minute-per-email";
 
     static final int DEFAULT_LIFESPAN = 600;
-    static final boolean DEFAULT_SAME_DEVICE = true;
     static final boolean DEFAULT_AUTO_CREATE = false;
     static final int DEFAULT_PER_IP = 5;
     static final int DEFAULT_PER_EMAIL = 3;
@@ -29,10 +27,6 @@ final class MagicLinkAuthConfig {
 
     int tokenLifespanSeconds() {
         return getInt(TOKEN_LIFESPAN_SECONDS, DEFAULT_LIFESPAN);
-    }
-
-    boolean sameDevice() {
-        return getBool(SAME_DEVICE, DEFAULT_SAME_DEVICE);
     }
 
     boolean autoCreateUser() {

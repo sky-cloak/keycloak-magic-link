@@ -55,7 +55,7 @@ import org.keycloak.util.JsonSerialization;
  *
  * <ul>
  *   <li>{@code POST /}        - issue a link for a user. Requires realm-management {@code manage-users}
- *       (override per realm via the {@code skycloak.magic-link.issue-role} attribute). Emails the link,
+ *       (override per realm via the {@code skycloak-magic-link-issue-role} attribute). Emails the link,
  *       or returns it when {@code send=false}.</li>
  *   <li>{@code DELETE /{id}}  - revoke a pending link by the id returned at issue.</li>
  *   <li>{@code GET  /consume} - confirm page for a Mode B link (does NOT burn the link).</li>
@@ -78,7 +78,7 @@ public final class MagicLinkResource {
 
     static final String REALM_MANAGEMENT_CLIENT = "realm-management";
     static final String DEFAULT_ISSUE_ROLE = "manage-users";
-    static final String ISSUE_ROLE_ATTRIBUTE = "skycloak.magic-link.issue-role";
+    static final String ISSUE_ROLE_ATTRIBUTE = "skycloak-magic-link-issue-role";
     static final int DEFAULT_LIFESPAN_SECONDS = 600;
     static final int PER_EMAIL_PER_MINUTE = 10;
 

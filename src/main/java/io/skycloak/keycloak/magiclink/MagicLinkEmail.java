@@ -40,7 +40,7 @@ final class MagicLinkEmail {
                     .send(SUBJECT_KEY, TEMPLATE, attrs);
             return;
         } catch (Exception e) {
-            LOG.debugf("themed magic-link email unavailable, using built-in body: %s", e.getMessage());
+            LOG.debug("themed magic-link email unavailable, using built-in body", e);
         }
         String subject = "Your sign-in link";
         String text = "Sign in to " + clientName + ":\n\n" + link

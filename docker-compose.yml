@@ -1,8 +1,10 @@
 # Local trial: build the jar, then `docker compose up`.
 #   mvn package && docker compose up
-# Keycloak starts on http://localhost:8080 (admin / admin) with the provider installed.
-# MailHog catches outbound mail on http://localhost:8025 - configure realm SMTP host
-# to `mailhog`, port `1025` to send through it.
+# A one-shot `demo-setup` container relaxes sslRequired (so http://localhost works, no "HTTPS
+# required") and provisions a ready `demo` realm with a Magic Link login. Once it logs "DEMO READY":
+#   - sign in: http://localhost:8080/realms/demo/account   (user alice@example.test)
+#   - inbox:   http://localhost:8025                        (MailHog catches the magic-link emails)
+#   - admin:   http://localhost:8080                        (admin / admin)
 services:
   mailhog:
     image: mailhog/mailhog:latest
@@ -22,3 +24,16 @@ services:
       - mailhog
     volumes:
       - ./target/keycloak-magic-link.jar:/opt/keycloak/providers/keycloak-magic-link.jar:ro
+
+  # Runs once over Keycloak's loopback (the only address exempt from the sslRequired HTTPS guard)
+  # to relax sslRequired and provision the demo realm. Shares keycloak's network namespace so
+  # localhost:8080 reaches Keycloak as 127.0.0.1.
+  demo-setup:
+    image: quay.io/keycloak/keycloak:26.0.7
+    depends_on:
+      - keycloak
+    network_mode: "service:keycloak"
+    restart: "no"
+    entrypoint: ["bash", "/demo-provision.sh"]
+    volumes:
+      - ./docker/demo-provision.sh:/demo-provision.sh:ro

@@ -15,7 +15,7 @@ jobs:
       matrix:
         keycloak: ["25.0.6", "26.0.7", "26.6.3"]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5

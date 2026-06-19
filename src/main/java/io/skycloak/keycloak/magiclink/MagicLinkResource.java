@@ -26,9 +26,11 @@ import org.keycloak.authentication.AuthenticationProcessor;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.common.util.Time;
 import org.keycloak.email.EmailException;
-import org.keycloak.email.EmailSenderProvider;
+import org.keycloak.events.Errors;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.events.EventType;
+import org.keycloak.events.admin.OperationType;
+import org.keycloak.events.admin.ResourceType;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientSessionContext;
 import org.keycloak.models.KeycloakSession;
@@ -42,6 +44,8 @@ import org.keycloak.services.managers.AppAuthManager;
 import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.managers.AuthenticationManager.AuthResult;
 import org.keycloak.services.managers.AuthenticationSessionManager;
+import org.keycloak.services.resources.admin.AdminAuth;
+import org.keycloak.services.resources.admin.AdminEventBuilder;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.keycloak.util.JsonSerialization;
@@ -63,7 +67,9 @@ import org.keycloak.util.JsonSerialization;
  * is a GET that shows the confirm page without burning, and only the human POST completes. Keycloak's
  * action-token endpoint is GET-only, so Mode B uses this resource's own consume rather than that
  * handler (which serves the same-device single-step Mode A flow). The raw link and token are never
- * logged. Issuance is account-takeover-equivalent, hence the admin gate.
+ * logged. Issuance is account-takeover-equivalent, hence the admin gate. Issue and revoke emit native
+ * admin events; consume emits native LOGIN / LOGIN_ERROR user events (ADR-0003); no event ever carries
+ * the link or token.
  */
 public final class MagicLinkResource {
 
@@ -99,7 +105,8 @@ public final class MagicLinkResource {
     @Produces(JSON)
     public Response issue(String rawBody) {
         RealmModel realm = realm();
-        requireIssueRole(realm, authenticate(realm));
+        AuthResult auth = authenticate(realm);
+        requireIssueRole(realm, auth);
 
         IssueRequest req;
         try {
@@ -158,7 +165,7 @@ public final class MagicLinkResource {
 
         if (send) {
             try {
-                sendEmail(realm, user.getEmail(), link, clientName(client));
+                sendEmail(realm, user, link, clientName(client));
             } catch (Exception e) {
                 LOG.warnf("magic-link admin issue: email send failed id=%s: %s", consumeId, e.getMessage());
                 return json(Response.Status.BAD_GATEWAY, err("email_send_failed", "the link could not be emailed"));
@@ -168,6 +175,15 @@ public final class MagicLinkResource {
             LOG.infof("magic-link admin issue: returned-to-caller user=%s client=%s id=%s",
                     user.getId(), req.clientId, consumeId);
         }
+
+        // Native admin event. Non-secret metadata only; never the link or token.
+        Map<String, Object> ev = new LinkedHashMap<>();
+        ev.put("userId", user.getId());
+        ev.put("clientId", req.clientId);
+        ev.put("mode", "admin");
+        ev.put("delivery", send ? "email" : "return");
+        ev.put("expiresAt", Time.currentTime() + lifespan);
+        adminEvent(realm, auth, OperationType.CREATE, consumeId, ev);
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", consumeId);
@@ -183,10 +199,14 @@ public final class MagicLinkResource {
     @Produces(JSON)
     public Response revoke(@PathParam("id") String id) {
         RealmModel realm = realm();
-        requireIssueRole(realm, authenticate(realm));
+        AuthResult auth = authenticate(realm);
+        requireIssueRole(realm, auth);
         if (blank(id) || !MagicLinkPendingStore.revoke(session, id)) {
             return json(Response.Status.NOT_FOUND, err("not_found", "no pending link with that id"));
         }
+        Map<String, Object> ev = new LinkedHashMap<>();
+        ev.put("id", id);
+        adminEvent(realm, auth, OperationType.DELETE, id, ev);
         LOG.infof("magic-link admin revoke: id=%s", id);
         return Response.noContent().build();
     }
@@ -217,18 +237,21 @@ public final class MagicLinkResource {
     @POST
     @Path("consume")
     public Response consumeComplete(@QueryParam("key") String key) {
+        RealmModel realm = realm();
         MagicLinkActionToken token = decode(key);
         if (token == null || !MagicLinkPendingStore.consume(session, token.getConsumeId())) {
+            loginError(realm, "invalid_or_used", Errors.EXPIRED_CODE);
             return htmlError(Response.Status.BAD_REQUEST,
                     "This sign-in link is invalid, has expired, or has already been used.");
         }
-        RealmModel realm = realm();
         ClientModel client = realm.getClientByClientId(token.getIssuedFor());
         if (client == null || !client.isEnabled()) {
+            loginError(realm, "unknown_client", Errors.CLIENT_NOT_FOUND);
             return htmlError(Response.Status.BAD_REQUEST, "The application is unknown or disabled.");
         }
         UserModel user = session.users().getUserById(realm, token.getUserId());
         if (user == null || !user.isEnabled()) {
+            loginError(realm, "user_unavailable", Errors.USER_DISABLED);
             return htmlError(Response.Status.UNAUTHORIZED, "The account is unavailable.");
         }
         user.setEmailVerified(true); // clicking a link proves control of the address (ADR-0004)
@@ -304,6 +327,37 @@ public final class MagicLinkResource {
         return response;
     }
 
+    /** Emits a native admin event for an issue/revoke. Best effort; never carries the link or token. */
+    private void adminEvent(RealmModel realm, AuthResult auth, OperationType op, String id,
+                            Map<String, Object> details) {
+        try {
+            ClientConnection conn = session.getContext().getConnection();
+            ClientModel adminClient = realm.getClientByClientId(auth.getToken().getIssuedFor());
+            AdminAuth adminAuth = new AdminAuth(realm, auth.getToken(), auth.getUser(), adminClient);
+            new AdminEventBuilder(realm, adminAuth, session, conn)
+                    .operation(op)
+                    .resource(ResourceType.USER)
+                    .resourcePath(session.getContext().getUri(), id)
+                    .representation(details)
+                    .success();
+        } catch (Exception e) {
+            LOG.warnf("magic-link: admin event emit failed: %s", e.getMessage());
+        }
+    }
+
+    /** Emits a native LOGIN_ERROR user event for a failed Mode B consume. Never carries the token. */
+    private void loginError(RealmModel realm, String reason, String error) {
+        try {
+            new EventBuilder(realm, session, session.getContext().getConnection())
+                    .event(EventType.LOGIN_ERROR)
+                    .detail("auth_method", MagicLinkActionToken.TOKEN_TYPE)
+                    .detail("magic_link_error", reason)
+                    .error(error);
+        } catch (Exception e) {
+            LOG.debugf("magic-link: login-error event emit failed: %s", e.getMessage());
+        }
+    }
+
     private AuthResult authenticate(RealmModel realm) {
         AuthResult auth = new AppAuthManager.BearerTokenAuthenticator(session)
                 .setRealm(realm)
@@ -352,15 +406,8 @@ public final class MagicLinkResource {
                 .toString();
     }
 
-    private void sendEmail(RealmModel realm, String to, String link, String clientName) throws EmailException {
-        String subject = "Your sign-in link";
-        String text = "Sign in to " + clientName + ":\n\n" + link
-                + "\n\nThis link expires shortly and can be used once.\n";
-        String html = "<p>Sign in to <strong>" + escape(clientName) + "</strong>:</p>"
-                + "<p><a href=\"" + escape(link) + "\">Sign in</a></p>"
-                + "<p>This link expires shortly and can be used once.</p>";
-        EmailSenderProvider sender = session.getProvider(EmailSenderProvider.class);
-        sender.send(realm.getSmtpConfig(), to, subject, text, html);
+    private void sendEmail(RealmModel realm, UserModel user, String link, String clientName) throws EmailException {
+        MagicLinkEmail.send(session, realm, user, link, clientName);
     }
 
     private RealmModel realm() {

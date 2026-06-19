@@ -11,7 +11,6 @@ import org.keycloak.OAuth2Constants;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.Authenticator;
 import org.keycloak.common.util.Time;
-import org.keycloak.email.EmailSenderProvider;
 import org.keycloak.models.Constants;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -151,7 +150,12 @@ public final class MagicLinkAuthenticator implements Authenticator {
             session.getContext().getHttpResponse().setCookieIfAbsent(cookie);
         }
 
-        sendEmail(session, realm, user.getEmail(), link, clientDisplayName(session));
+        try {
+            MagicLinkEmail.send(session, realm, user, link, clientDisplayName(session));
+        } catch (Exception e) {
+            // Anti-enumeration: never surface send failures to the caller. Log and move on.
+            LOG.warnf("magic-link: email send failed: %s", e.getMessage());
+        }
         LOG.infof("magic-link: issued link user=%s client=%s sameDevice=%b", user.getId(), clientId,
                 deviceNonce != null);
     }
@@ -163,30 +167,6 @@ public final class MagicLinkAuthenticator implements Authenticator {
         }
         return client.getName() != null && !client.getName().isBlank()
                 ? client.getName() : client.getClientId();
-    }
-
-    private static void sendEmail(KeycloakSession session, RealmModel realm, String to, String link,
-                                  String clientName) {
-        String subject = "Your sign-in link";
-        String text = "Sign in to " + clientName + ":\n\n" + link
-                + "\n\nThis link expires shortly and can be used once. "
-                + "If you did not request it you can ignore this email.\n";
-        String html = "<p>Sign in to <strong>" + escape(clientName) + "</strong>:</p>"
-                + "<p><a href=\"" + escape(link) + "\">Sign in</a></p>"
-                + "<p>This link expires shortly and can be used once. "
-                + "If you did not request it you can ignore this email.</p>";
-        try {
-            EmailSenderProvider sender = session.getProvider(EmailSenderProvider.class);
-            sender.send(realm.getSmtpConfig(), to, subject, text, html);
-        } catch (Exception e) {
-            // Anti-enumeration: never surface send failures to the caller. Log and move on.
-            LOG.warnf("magic-link: email send failed: %s", e.getMessage());
-        }
-    }
-
-    private static String escape(String s) {
-        return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace("\"", "&quot;");
     }
 
     @Override

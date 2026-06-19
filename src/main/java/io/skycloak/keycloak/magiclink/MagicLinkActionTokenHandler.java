@@ -73,7 +73,8 @@ public final class MagicLinkActionTokenHandler
             String cookieVal = readCookie(ctx, DEVICE_COOKIE);
             if (cookieVal == null || !cookieVal.equals(token.getDeviceNonce())) {
                 LOG.warnf("magic-link same-device check failed (cookiePresent=%b)", cookieVal != null);
-                ctx.getEvent().error(Errors.INVALID_TOKEN);
+                ctx.getEvent().event(EventType.LOGIN_ERROR).detail("magic_link_error", "wrong_device")
+                        .error(Errors.INVALID_TOKEN);
                 return htmlError(Response.Status.FORBIDDEN,
                         "Open this sign-in link in the same browser where you started signing in.");
             }
@@ -82,7 +83,8 @@ public final class MagicLinkActionTokenHandler
         // Single use: atomically burn the registry entry. A replay, expiry, or admin revoke fails.
         if (!MagicLinkPendingStore.consume(ctx.getSession(), token.getConsumeId())) {
             LOG.debugf("magic-link consume rejected: registry entry absent (used/expired/revoked)");
-            ctx.getEvent().error(Errors.EXPIRED_CODE);
+            ctx.getEvent().event(EventType.LOGIN_ERROR).detail("magic_link_error", "invalid_or_used")
+                    .error(Errors.EXPIRED_CODE);
             return htmlError(Response.Status.BAD_REQUEST,
                     "This sign-in link is invalid, has expired, or has already been used.");
         }

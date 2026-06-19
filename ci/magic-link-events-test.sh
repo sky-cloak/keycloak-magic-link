@@ -35,13 +35,21 @@ docker run -d --name "${KC_NAME}" --network "${NET_NAME}" -p "${PORT}:8080" \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -v "${JAR}:/opt/keycloak/providers/keycloak-magic-link.jar:ro" \
   "${IMAGE}" start-dev >/dev/null
-up=; for _ in $(seq 1 80); do curl -fsS "${BASE}/realms/master" >/dev/null 2>&1 && { up=1; break; }; sleep 3; done
-[[ -n "${up}" ]] || fail "Keycloak did not start"
-for i in $(seq 1 10); do kcadm config credentials --server http://localhost:8080 --realm master --user admin --password admin >/dev/null 2>&1 && break; sleep 2; done
-kcadm config credentials --server http://localhost:8080 --realm master --user admin --password admin >/dev/null
-
-MTOK=$(curl -fsS -d "grant_type=password&client_id=admin-cli&username=admin&password=admin" "${BASE}/realms/master/protocol/openid-connect/token" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
-[[ -n "${MTOK}" ]] || fail "no master token"
+# kcadm runs inside the container over loopback, which is exempt from the realm sslRequired guard;
+# the host-mapped token endpoint is not, so a host-side token request to master otherwise returns
+# {"error":"invalid_request","error_description":"HTTPS required"}. Authenticate with kcadm first
+# (also our readiness signal, retried until the bootstrap admin exists), relax master sslRequired
+# over loopback, then mint the host-side master token the events queries need.
+for _ in $(seq 1 90); do kcadm config credentials --server http://localhost:8080 --realm master --user admin --password admin >/dev/null 2>&1 && break; sleep 3; done
+kcadm config credentials --server http://localhost:8080 --realm master --user admin --password admin >/dev/null || fail "kcadm could not authenticate to Keycloak"
+kcadm update realms/master -s sslRequired=NONE >/dev/null
+MTOK=""
+for _ in $(seq 1 30); do
+  MTOK=$(curl -fsS -d "grant_type=password&client_id=admin-cli&username=admin&password=admin" "${BASE}/realms/master/protocol/openid-connect/token" 2>/dev/null | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p') || true
+  [[ -n "${MTOK}" ]] && break
+  sleep 2
+done
+[[ -n "${MTOK}" ]] || { echo "last token response:"; curl -sS -d "grant_type=password&client_id=admin-cli&username=admin&password=admin" "${BASE}/realms/master/protocol/openid-connect/token" || true; fail "no master token"; }
 
 echo ">> realm ${REALM} + events enabled + SMTP + clients + user"
 kcadm create realms -s realm="${REALM}" -s enabled=true -s sslRequired=NONE >/dev/null

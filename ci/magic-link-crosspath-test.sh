@@ -98,18 +98,24 @@ for _ in $(seq 1 80); do curl -fsS "${BASE}/realms/master" >/dev/null 2>&1 && { 
 
 for _ in $(seq 1 10); do kcadm config credentials --server http://localhost:8080 --realm master --user admin --password admin >/dev/null 2>&1 && break; sleep 2; done
 kcadm config credentials --server http://localhost:8080 --realm master --user admin --password admin >/dev/null
+# Events are read at 2a via the ml-admin service-account token (view-events), not a master
+# temp-admin password grant (which races against bootstrap-admin readiness on a loaded host).
 
 echo ">> [${KC_VERSION}] realm + SMTP + public PKCE client + user + authenticator browser flow"
 kcadm create realms -s realm="${REALM}" -s enabled=true -s sslRequired=NONE >/dev/null
 kcadm update realms/"${REALM}" \
   -s 'smtpServer.host='"${MAIL_NAME}" -s 'smtpServer.port=1025' \
   -s 'smtpServer.from=noreply@example.test' -s 'smtpServer.fromDisplayName=Skycloak Magic Link' \
-  -s 'smtpServer.auth=false' -s 'smtpServer.ssl=false' -s 'smtpServer.starttls=false' >/dev/null
+  -s 'smtpServer.auth=false' -s 'smtpServer.ssl=false' -s 'smtpServer.starttls=false' \
+  -s eventsEnabled=true >/dev/null
 kcadm create clients -r "${REALM}" -s clientId="${CLIENT}" -s enabled=true \
   -s publicClient=true -s standardFlowEnabled=true \
   -s 'redirectUris=["http://localhost/cb"]' -s 'webOrigins=["*"]' >/dev/null
 kcadm create users -r "${REALM}" -s username=alice -s email="${EMAIL}" \
   -s firstName=Alice -s lastName=Example -s emailVerified=false -s enabled=true >/dev/null
+kcadm create clients -r "${REALM}" -s clientId=ml-admin -s serviceAccountsEnabled=true -s publicClient=false -s secret=adminsecret >/dev/null
+kcadm add-roles -r "${REALM}" --uusername service-account-ml-admin --cclientid realm-management --rolename manage-users >/dev/null
+kcadm add-roles -r "${REALM}" --uusername service-account-ml-admin --cclientid realm-management --rolename view-events >/dev/null
 kcadm create authentication/flows -r "${REALM}" \
   -s alias=magic -s providerId=basic-flow -s topLevel=true -s builtIn=false >/dev/null
 kcadm create authentication/flows/magic/executions/execution -r "${REALM}" \
@@ -175,6 +181,39 @@ if [[ -n "${CONSUME_CODE}" ]]; then
   echo "   PASS: genuine same-device click completed (replay was rejected without burning)"
 else
   echo "   FAIL: genuine consume produced no code (replay burned it, or same-device broke)"; FAILED=1
+fi
+
+echo; echo "=== 2a: a successful Mode A consume is observable in events (LOGIN + magic-link-tagged success) ==="
+sleep 1
+EVTOK=$(curl -fsS -d "grant_type=client_credentials&client_id=ml-admin&client_secret=adminsecret" "${BASE}/realms/${REALM}/protocol/openid-connect/token" 2>/dev/null | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+EV=$(curl -fsS "${BASE}/admin/realms/${REALM}/events" -H "Authorization: Bearer ${EVTOK}" 2>/dev/null || echo '[]')
+# Mode A completes via the browser flow, so its LOGIN event is auth_method=openid-connect (idiomatic,
+# satisfies ADR-0003). The magic-link marker rides on the EXECUTE_ACTION_TOKEN success event
+# (auth_method=skycloak-magic-link), which makes a successful magic-link login auditable.
+if echo "${EV}" | grep -q '"type":"LOGIN"' \
+   && echo "${EV}" | grep -q '"type":"EXECUTE_ACTION_TOKEN"' \
+   && echo "${EV}" | grep -q 'skycloak-magic-link'; then
+  echo "   PASS: consume recorded a LOGIN and a magic-link-tagged EXECUTE_ACTION_TOKEN success"
+else
+  echo "   FAIL: missing LOGIN or magic-link-tagged success event"
+  echo "   events: $(echo "${EV}" | head -c 600)"; FAILED=1
+fi
+
+echo; echo "=== ATTACK 3 (2b): replay a Mode B token at the GET-only action-token endpoint ==="
+ADMIN_TOK=$(curl -fsS -d "grant_type=client_credentials&client_id=ml-admin&client_secret=adminsecret" "${BASE}/realms/${REALM}/protocol/openid-connect/token" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+curl -sS -o "${WORK}/mb.json" -X POST "${BASE}/realms/${REALM}/skycloak-magic-link" \
+  -H "Authorization: Bearer ${ADMIN_TOK}" -H 'Content-Type: application/json' \
+  -d '{"email":"'"${EMAIL}"'","clientId":"'"${CLIENT}"'","redirectUri":"'"${CB}"'","send":false}' >/dev/null
+MBKEY=$(sed -n 's/.*"link":"\([^"]*\)".*/\1/p' "${WORK}/mb.json" | sed -n 's/.*[?&]key=\([^&]*\).*/\1/p')
+[[ -n "${MBKEY}" ]] || { echo "   FAIL: could not mint a Mode B token for ATTACK 3"; FAILED=1; }
+AT_HDR="${WORK}/at_hdr"; : > "${AT_HDR}"
+curl -s -D "${AT_HDR}" -o /dev/null -L --max-redirs 10 "${BASE}/realms/${REALM}/login-actions/action-token?key=${MBKEY}&client_id=${CLIENT}" >/dev/null 2>&1 || true
+AT_CODE=$(grep -i '^location:' "${AT_HDR}" | tr -d '\r' | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p' | head -1)
+echo "   action-token replay -> code: $([[ -n "${AT_CODE}" ]] && echo present || echo none)"
+if [[ -z "${AT_CODE}" ]]; then
+  echo "   PASS: Mode B token rejected at the action-token endpoint (no authorization code)"
+else
+  echo "   FAIL: Mode B token completed a login at the action-token endpoint (handler accepted null-deviceNonce)"; FAILED=1
 fi
 
 echo

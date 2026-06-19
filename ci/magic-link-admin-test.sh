@@ -126,14 +126,11 @@ LOCR=$(printf '%s' "${PRH}" | awk 'tolower($1)=="location:"{print $2}' | tr -d '
 if echo "${LOCR}" | grep -q 'code='; then fail "revoked link should not complete"; else echo "   revoke confirmed (204; consume blocked)"; fi
 
 echo ">> TEST 5: realm-attribute role override"
-# Set the dotted realm attribute via the admin REST API (kcadm -s mangles dotted keys).
-MTOK=$(curl -fsS -d "grant_type=password&client_id=admin-cli&username=admin&password=admin" \
-  "${BASE}/realms/master/protocol/openid-connect/token" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
-[[ -n "${MTOK}" ]] || fail "no master admin token"
-curl -fsS -o /dev/null -X PUT "${BASE}/admin/realms/${REALM}" -H "Authorization: Bearer ${MTOK}" \
-  -H 'Content-Type: application/json' -d '{"attributes":{"skycloak.magic-link.issue-role":"view-users"}}'
+# The override key is hyphenated (no dots), so kcadm -s sets it directly - no host admin
+# token or REST round-trip needed (kcadm is already authenticated in-container).
+kcadm update realms/"${REALM}" -s 'attributes.skycloak-magic-link-issue-role=view-users' >/dev/null
 kcadm add-roles -r "${REALM}" --uusername service-account-ml-noperm --cclientid realm-management --rolename view-users >/dev/null
-OVR_TOK="$(tok ml-noperm nopermsecret)"
+OVR_TOK="$(tok ml-noperm nopermsecret)"; [[ -n "${OVR_TOK}" ]] || fail "no override token"
 OC=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/realms/${REALM}/skycloak-magic-link" \
   -H "Authorization: Bearer ${OVR_TOK}" -H 'Content-Type: application/json' \
   -d '{"email":"alice@example.test","clientId":"'"${APP_CLIENT}"'","redirectUri":"'"${REDIRECT}"'","send":false}')

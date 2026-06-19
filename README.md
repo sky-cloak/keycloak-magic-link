@@ -4,6 +4,10 @@
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Keycloak](https://img.shields.io/badge/Keycloak-25%20%7C%2026-blue.svg)
 
+> **Running Keycloak in production?** [Skycloak](https://skycloak.io) is managed Keycloak hosting
+> with automated upgrades, monitoring, backups, and expert support, so your team ships features
+> instead of operating identity infrastructure.
+
 Passwordless email magic-link sign-in for Keycloak. A user receives a one-time link, clicks
 it, and Keycloak signs them in with a standard OIDC authorization code. One small jar,
 Apache 2.0, no extra service to run.
@@ -30,8 +34,12 @@ baseline.
 
 ## Managed option
 
-Prefer not to self-host? [Skycloak](https://skycloak.io) offers managed Keycloak with
-monitoring, automated upgrades, and support. Built and maintained by the Skycloak team.
+Prefer not to self-host? [Skycloak](https://skycloak.io) is **managed, hosted Keycloak**: automated
+version upgrades (this extension included), monitoring and alerting, backups, custom domains, and
+enterprise Keycloak support. It is upstream Keycloak underneath, so there is no lock-in and you can
+migrate an existing realm in. This extension is built and maintained by the Skycloak team.
+
+Passwordless and magic-link login, ready to switch on at [skycloak.io](https://skycloak.io).
 
 ## Compatibility
 
@@ -57,14 +65,27 @@ cp target/keycloak-magic-link.jar /opt/keycloak/providers/
 
 Build against a specific server: `mvn -Dkeycloak.version=26.6.3 package`.
 
-### Try it with Docker
+## Try it locally
 
 ```bash
 mvn package && docker compose up
 ```
 
-Keycloak starts on <http://localhost:8080> (admin / admin) with the provider installed and
-MailHog catching outbound mail on <http://localhost:8025>.
+This boots Keycloak with the provider, MailHog to catch the emails, and a one-shot `demo-setup`
+container that relaxes `sslRequired` (so plain `http://localhost` works, no "HTTPS required") and
+provisions a ready **`demo`** realm with a Magic Link login. Wait for `demo-setup` to log
+**`DEMO READY`**, then:
+
+1. Open <http://localhost:8080/realms/demo/account> and enter `alice@example.test`.
+2. Open the link from the **MailHog inbox** (<http://localhost:8025>) in the same browser. You are
+   signed in.
+
+Security check: open that same link in a different browser (or incognito). It is rejected
+("open it in the same browser") - that is same-device binding.
+
+The admin console is at <http://localhost:8080> (admin / admin). To wire magic-link into your own
+realm, see [Mode A](#mode-a-login-flow-authenticator); for the issuance API, see
+[Mode B](#mode-b-admin-issuance-api).
 
 ## Prerequisites
 
@@ -101,6 +122,23 @@ Set these on the authenticator execution (the gear icon) in the admin console:
 An auto-created user with only an email may be prompted to complete their profile on first
 sign-in, per the realm's required actions.
 
+## Conditional flows (password or magic link)
+
+The authenticator composes with Keycloak's stock flow building blocks, so the common "password or
+magic link" UX needs no extra code, just flow configuration (Authentication -> Flows):
+
+- **Offer both, user chooses.** Put Password and **Magic Link (Skycloak)** as **Alternative**
+  executions in the same sub-flow. Keycloak shows one, with a "Try another way" link to switch.
+- **Password if the user has one, else send a link.** Identify the user first (Username Form), then
+  a conditional sub-flow of **Condition - user configured** + Password: it runs only for users who
+  have a password, and everyone else falls through to **Magic Link (Skycloak)**.
+- **Route by attribute or role.** Gate the magic-link sub-flow with **Condition - User Attribute**
+  (e.g. `prefer-magic-link=true`) or **Condition - User Role**.
+
+Heads up: any identity-first flow that shows different options per user reveals whether an account
+exists and what credentials it has. The standalone magic-link step is non-enumerable by design; the
+conditional patterns trade that away, so choose deliberately.
+
 ## Mode B: admin issuance API
 
 Mounted at `/realms/{realm}/skycloak-magic-link`. Issuance requires the realm-management role
@@ -132,6 +170,20 @@ written to logs. Revoke with `DELETE .../{id}` using the returned `id`.
 Admin-issued links are cross-device (no same-device cookie), so they use a two-step confirm:
 the emailed link is a `GET` that shows a "Sign in?" page without consuming, and only the human
 `POST` completes. Email security scanners that follow GET links therefore cannot burn the link.
+
+## Customizing copy and email
+
+Every on-screen string and the email are Keycloak message keys (defaults in the bundled
+`messages_en.properties`), so you can reword or translate them without touching code:
+
+- **Per realm, no rebuild:** Realm settings -> Localization -> enable, then add a key and value,
+  e.g. `magicLinkFormTitle`, `magicLinkSentInstruction`, `magicLinkEmailSubject`. Add the same keys
+  under another locale to translate.
+- **Via a theme:** override the keys in your login/email theme's message bundle, or replace the
+  `skycloak-magic-link-*.ftl` templates entirely for full control of the markup.
+
+Key prefixes: `magicLinkForm*` / `magicLinkSent*` / `magicLinkConfirm*` (pages) and
+`magicLinkEmail*` (email).
 
 ## Security model
 

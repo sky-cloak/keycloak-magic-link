@@ -3,13 +3,13 @@
     <#if section = "header">
         ${msg("magicLinkFormTitle")}
     <#elseif section = "form">
-        <form id="kc-magic-link-form" action="${url.loginAction}" method="post">
+        <form id="kc-magic-link-form" class="${properties.kcFormClass!}" action="${url.loginAction}" method="post">
             <div class="${properties.kcFormGroupClass!}">
                 <label for="email" class="${properties.kcLabelClass!}">${msg("magicLinkEmailLabel")}</label>
                 <input type="email" id="email" name="email" autofocus autocomplete="email"
                        class="${properties.kcInputClass!}"/>
             </div>
-            <div class="${properties.kcFormGroupClass!}">
+            <div id="kc-form-buttons" class="${properties.kcFormGroupClass!} ${properties.kcFormButtonsClass!}">
                 <input type="submit" value="${msg("magicLinkFormSubmit")}"
                        class="${properties.kcButtonClass!} ${properties.kcButtonPrimaryClass!} ${properties.kcButtonBlockClass!} ${properties.kcButtonLargeClass!}"/>
             </div>

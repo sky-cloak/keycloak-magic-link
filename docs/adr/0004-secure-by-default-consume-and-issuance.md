@@ -16,12 +16,15 @@ a well-meaning "simplification" that reopens a hole.
   same-device (the default), consume is single-step and scanner-safe by construction: the
   same-device cookie check runs before the single-use burn, so a scanner that prefetches
   the link has no device cookie, fails the check, and returns a 403 without burning the
-  registry entry; the genuine same-browser click then burns it once and completes. The
-  no-cookie path (Mode B admin-issued links, which are cross-device, and the basis for any
-  opt-in any-device Mode A) instead uses a two-step confirm: GET shows a "Sign in?" page
+  registry entry; the genuine same-browser click then burns it once and completes. Mode A
+  always carries a device cookie in v0.3.0 (any-device is deferred, see 0001), so its
+  consume is always this single-step path. The no-cookie path (Mode B admin-issued links,
+  which are cross-device) instead uses a two-step confirm: GET shows a "Sign in?" page
   without burning, POST burns and completes, so a scanner's prefetch GET is harmless. That
   two-step lives on the resource's own GET/POST `/skycloak-magic-link/consume`, not on
   Keycloak's action-token endpoint, because that endpoint is GET-only (a POST to it 404s).
+  When any-device Mode A is eventually added it must route through this two-step path (or
+  ship the confirmation code), never the single-step action-token handler.
 - **Cross-path guard (security-critical).** The cookieless resource `/consume` must reject
   any token that carries a device nonce (a same-device Mode A token). Without this, an
   intercepted Mode A link could be replayed against the cookieless endpoint and bypass

@@ -23,8 +23,9 @@ would otherwise work cross-device, so the authenticator sets a device cookie (Se
 SameSite=Lax, which is required for the top-level GET from an email client to send it)
 when it sends the link, and the handler rejects a click whose cookie is absent or
 mismatched (verified: cross-device click returns 403, no code). Same-device is the
-default, the strongest defense against the trigger-then-click phishing pattern; an opt-in
-config can relax it to any-device.
+strongest defense against the trigger-then-click phishing pattern. v0.3.0 enforces it
+unconditionally (there is no any-device toggle): any-device would need its own scanner-safe
+control, so it is a deferred follow-up rather than a switch that silently weakens the flow.
 
 We use Keycloak's ActionToken subsystem rather than a hand-rolled opaque token so the
 security-critical plumbing rides on platform-tested code and stays stable across majors

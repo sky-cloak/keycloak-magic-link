@@ -9,16 +9,18 @@ mvn package                              # build + unit tests
 mvn -Dkeycloak.version=25.0.6 package    # build against a specific Keycloak version
 ```
 
-JDK 21 is used to build; the jar targets bytecode 17 and runs on Keycloak 24, 25, and 26.
+JDK 21 is used to build; the jar targets bytecode 17 and runs on Keycloak 25 and 26.
 
-## Integration test
+## Integration tests
 
 ```bash
-ci/integration-test.sh 26.0.7            # boots a real Keycloak with the jar and verifies behavior
+ci/magic-link-authenticator-test.sh 26.6.3   # Mode A login-flow end-to-end (real Keycloak + MailHog)
+ci/magic-link-admin-test.sh 26.6.3           # Mode B admin API (issue / revoke / send / two-step consume)
+ci/magic-link-crosspath-test.sh 26.6.3       # same-device bypass regression
 ```
 
-Requires Docker. CI runs the build plus this integration test against Keycloak 24.0.5,
-25.0.6, and 26.0.7 on every push.
+Requires Docker. CI runs the build plus the full test suite against Keycloak 25.0.6,
+26.0.7, and 26.6.3 on every push.
 
 ## Pull requests
 

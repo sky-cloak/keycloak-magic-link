@@ -18,7 +18,7 @@ is removed.
   `AuthenticatorConfig` tunes lifespan, same-device, auto-create-user, and rate limits.
 - **Admin issuance API (Mode B).** `POST /realms/{realm}/skycloak-magic-link` mints a link for a user
   (requires the realm-management role `manage-users`, overridable per realm via the
-  `skycloak.magic-link.issue-role` attribute); it emails the link, or returns it when `send=false`.
+  `skycloak-magic-link-issue-role` attribute); it emails the link, or returns it when `send=false`.
   `DELETE /realms/{realm}/skycloak-magic-link/{id}` revokes a pending link.
 - **Scanner-safe consume.** Under same-device the consume is single-step and scanner-safe by
   construction (the device-cookie check precedes the single-use burn). Admin-issued and any-device

@@ -94,7 +94,6 @@ Set these on the authenticator execution (the gear icon) in the admin console:
 | Setting | Default | Description |
 |---|---|---|
 | Token lifespan (seconds) | `600` | how long a link is valid |
-| Same-device | `on` | require the link to be opened in the browser that requested it |
 | Auto-create user | `off` | create a user for an unknown email on first request |
 | Requests/min/IP | `5` | per-client-IP rate limit (`0` disables) |
 | Requests/min/email | `3` | per-email rate limit (`0` disables) |
@@ -105,7 +104,7 @@ sign-in, per the realm's required actions.
 ## Mode B: admin issuance API
 
 Mounted at `/realms/{realm}/skycloak-magic-link`. Issuance requires the realm-management role
-**`manage-users`** (override per realm with the `skycloak.magic-link.issue-role` attribute).
+**`manage-users`** (override per realm with the `skycloak-magic-link-issue-role` attribute).
 Minting a link logs a user in, so treat the endpoint as account-takeover-equivalent.
 
 | Method & path | Auth | Purpose |
@@ -138,12 +137,12 @@ the emailed link is a `GET` that shows a "Sign in?" page without consuming, and 
 
 - **Single-use, short-lived.** Links are one-time and expire on a configurable lifespan
   (default 10 minutes), tracked cluster-wide in Keycloak's `SingleUseObjectProvider`.
-- **Same-device by default (Mode A).** The link completes only in the browser that requested
-  it (a `SKYCLOAK_MAGIC_DEVICE` cookie), so an intercepted or forwarded link is useless
-  elsewhere.
+- **Same-device (Mode A).** The link completes only in the browser that requested it (a
+  `SKYCLOAK_MAGIC_DEVICE` cookie), so an intercepted or forwarded link is useless
+  elsewhere. v0.3.0 enforces this unconditionally; any-device is a deferred follow-up.
 - **Scanner-safe.** Under same-device the device-cookie check precedes the burn, so a
-  scanner's cookieless prefetch fails without consuming. Cookieless links (admin or
-  any-device) use the two-step confirm instead.
+  scanner's cookieless prefetch fails without consuming. Cookieless admin-issued links use
+  the two-step confirm instead.
 - **PKCE-correct.** Mode A completes the user's original authorization request, so codes stay
   bound to the client's PKCE challenge.
 - **No account enumeration.** The authenticator shows the same "check your email" page whether

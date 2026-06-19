@@ -35,12 +35,13 @@ show up as the "latest" version.
 
 ## Keycloak compatibility
 
-Every release supports **Keycloak 24, 25, and 26** at minimum. The CI matrix builds and
-integration-tests against the latest patch of each. New Keycloak majors are added to the matrix as
-they release; we keep at least two previous majors supported.
+Every release supports **Keycloak 25 and 26**. The CI matrix builds and integration-tests against
+25.0.6, 26.0.7, and the current 26.6.x. Keycloak 24 was dropped at v0.3.0 (it is past upstream
+maintenance, and the action-token rebuild is cleaner without straddling it). Keycloak 27 will be
+added to the matrix when it ships; we keep at least the two most recent supported majors.
 
-The release artifact is built against Keycloak 26.0.7, which is forward-compatible with 24/25 SPI
-surface for everything this extension uses.
+The release artifact is built against Keycloak 26.0.7, whose SPI surface is compatible with the 25
+and 26.6 targets for everything this extension uses.
 
 ## Release process
 

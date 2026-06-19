@@ -25,9 +25,14 @@ is removed.
   links carry no cookie, so they use a two-step confirm page (GET shows it without burning, POST
   completes), which email security scanners that follow GET links cannot trip.
 - A successful sign-in sets `emailVerified=true` (clicking a link proves control of the address).
+- **Native audit events.** Issue and revoke emit Keycloak admin events; consume emits `LOGIN` and
+  `LOGIN_ERROR` user events. No event carries the link or token.
+- **Themed email.** The magic-link email renders from FreeMarker theme-resources
+  (`skycloak-magic-link-email.ftl`, html + text, i18n), overridable per realm, with a built-in fallback.
 
 ### Changed
 - Authenticator configuration is per-flow (`AuthenticatorConfig`), not server-global SPI flags.
+- Keycloak 24 is no longer supported; the CI matrix is now 25.0.6, 26.0.7, and the current 26.6.x.
 
 ### Removed
 - **The unauthenticated `POST /request` endpoint** and the `GET /consume` opaque-token endpoint.

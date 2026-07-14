@@ -28,8 +28,10 @@ MAIL_HTTP_PORT=$((PORT + 1))
 WORK="$(mktemp -d)"
 
 [[ -f "${JAR}" ]] || { echo "ERROR: ${JAR} missing - run mvn -Dkeycloak.version=${KC_VERSION} package" >&2; exit 1; }
+source "$(dirname "$0")/jacoco.sh"; setup_jacoco
 
 cleanup() {
+  collect_jacoco
   docker rm -f "${KC_NAME}" >/dev/null 2>&1 || true
   docker rm -f "${MAIL_NAME}" >/dev/null 2>&1 || true
   docker network rm "${NET_NAME}" >/dev/null 2>&1 || true
@@ -87,6 +89,7 @@ for _ in $(seq 1 15); do curl -fsS "http://localhost:${MAIL_HTTP_PORT}/api/v2/me
 
 echo ">> [${KC_VERSION}] starting Keycloak with provider mounted"
 docker run -d --name "${KC_NAME}" --network "${NET_NAME}" -p "${PORT}:8080" \
+  "${JACOCO_DOCKER_ARGS[@]}" \
   -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -v "${JAR}:/opt/keycloak/providers/keycloak-magic-link.jar:ro" \

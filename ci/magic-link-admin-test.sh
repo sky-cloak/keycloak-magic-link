@@ -22,8 +22,9 @@ KC_NAME="kc-mladmin-${SUFFIX}"; MAIL_NAME="mail-mladmin-${SUFFIX}"; NET_NAME="ne
 MAIL_HTTP_PORT=$((PORT + 1))
 
 [[ -f "${JAR}" ]] || { echo "ERROR: ${JAR} missing - run mvn -Dkeycloak.version=${KC_VERSION} package" >&2; exit 1; }
+source "$(dirname "$0")/jacoco.sh"; setup_jacoco
 
-cleanup() { docker rm -f "${KC_NAME}" "${MAIL_NAME}" >/dev/null 2>&1 || true; docker network rm "${NET_NAME}" >/dev/null 2>&1 || true; }
+cleanup() { collect_jacoco; docker rm -f "${KC_NAME}" "${MAIL_NAME}" >/dev/null 2>&1 || true; docker network rm "${NET_NAME}" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 kcadm() { docker exec "${KC_NAME}" /opt/keycloak/bin/kcadm.sh "$@"; }
 mail_count() { curl -fsS "http://localhost:${MAIL_HTTP_PORT}/api/v2/messages" 2>/dev/null | sed -n 's/.*"total":\([0-9]*\).*/\1/p' || echo 0; }
@@ -36,6 +37,7 @@ for _ in $(seq 1 15); do curl -fsS "http://localhost:${MAIL_HTTP_PORT}/api/v2/me
 
 echo ">> Keycloak ${IMAGE}"
 docker run -d --name "${KC_NAME}" --network "${NET_NAME}" -p "${PORT}:8080" \
+  "${JACOCO_DOCKER_ARGS[@]}" \
   -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin \
   -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -v "${JAR}:/opt/keycloak/providers/keycloak-magic-link.jar:ro" \
@@ -105,6 +107,16 @@ fi
 PH2=$(curl -sS -o /dev/null -D - -X POST "${LINK}")
 LOC2=$(printf '%s' "${PH2}" | awk 'tolower($1)=="location:"{print $2}' | tr -d '\r')
 if echo "${LOC2}" | grep -q 'code='; then fail "replay POST should not re-issue a code"; else echo "   single-use confirmed"; fi
+
+echo ">> TEST 2b: request validation errors"
+validate() { curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/realms/${REALM}/skycloak-magic-link" -H "Authorization: Bearer ${ADMIN_TOK}" -H 'Content-Type: application/json' -d "$1"; }
+[[ "$(validate '{')" == "400" ]] || fail "malformed JSON should be 400"
+[[ "$(validate '{"email":"alice@example.test"}')" == "400" ]] || fail "missing client/redirect should be 400"
+[[ "$(validate '{"email":"nobody@example.test","clientId":"mlapp","redirectUri":"http://localhost/cb","send":false}')" == "404" ]] || fail "unknown user should be 404"
+[[ "$(validate '{"email":"alice@example.test","clientId":"missing","redirectUri":"http://localhost/cb","send":false}')" == "400" ]] || fail "unknown client should be 400"
+[[ "$(validate '{"email":"alice@example.test","clientId":"mlapp","redirectUri":"http://not-registered/cb","send":false}')" == "400" ]] || fail "unregistered redirect should be 400"
+VC=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "${BASE}/realms/${REALM}/skycloak-magic-link/not-a-pending-link" -H "Authorization: Bearer ${ADMIN_TOK}")
+[[ "${VC}" == "404" ]] || fail "unknown revoke should be 404"
 
 echo ">> TEST 3: send=false returns link in body, not emailed, not logged"
 MB=$(mail_count)

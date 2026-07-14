@@ -71,7 +71,7 @@ issue() { # $1=token $2=json-body  -> prints "HTTP\n<body>"
   curl -sS -o /tmp/mladmin-body.json -w '%{http_code}' -X POST "${BASE}/realms/${REALM}/skycloak-magic-link" \
     -H "Authorization: Bearer $1" -H 'Content-Type: application/json' -d "$2"; echo; cat /tmp/mladmin-body.json; }
 last_link() { curl -fsS "http://localhost:${MAIL_HTTP_PORT}/api/v2/messages" | perl -0pe 's/=(?:\r?\n)//g' \
-    | grep -oE 'http[^"\\ ]+/realms/'"${REALM}"'/skycloak-magic-link/consume[^"\\ ]+' | head -1; }
+    | grep -oE 'http[^"\\ ]+/realms/'"${REALM}"'/skycloak-magic-link/consume[^"\\ ]+' | sed -n '1p'; }
 
 echo ">> TEST 1: 403 without manage-users"
 C=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "${BASE}/realms/${REALM}/skycloak-magic-link" \

@@ -217,6 +217,24 @@ ci/magic-link-crosspath-test.sh 26.6.3        # same-device bypass regression
 
 CI builds and runs the full suite against Keycloak 25.0.6, 26.0.7, and 26.6.3 on every push.
 
+### Coverage
+
+The `coverage-report` profile merges JUnit coverage with optional coverage collected from the
+real-Keycloak integration containers, then enforces a 95% production-line threshold:
+
+```bash
+mvn -Dkeycloak.version=26.6.3 package
+export JACOCO_COVERAGE_DIR="$PWD/target/jacoco-it"
+ci/magic-link-authenticator-test.sh 26.6.3
+ci/magic-link-admin-test.sh 26.6.3
+ci/magic-link-crosspath-test.sh 26.6.3
+ci/magic-link-events-test.sh 26.6.3
+ci/magic-link-modea-extra-test.sh 26.6.3
+mvn -Pcoverage-report -DskipTests verify
+```
+
+The merged report is `target/site/jacoco/index.html`.
+
 ## Naming
 
 Server-global identifiers are prefixed `skycloak-` so they cannot collide with other

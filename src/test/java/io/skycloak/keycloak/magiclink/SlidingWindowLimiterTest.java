@@ -11,6 +11,15 @@ import org.junit.jupiter.api.Test;
 
 class SlidingWindowLimiterTest {
 
+    @Test
+    void calculatesTheOldestExpiryAndClampsRetryAfter() {
+        SlidingWindowLimiter.Decision decision = SlidingWindowLimiter.evaluate(
+                java.util.List.of(99L, 91L), 100L, 10L, 2);
+
+        assertFalse(decision.allowed());
+        assertEquals(1L, decision.retryAfterSeconds());
+    }
+
     private static final long WINDOW = 60L;
 
     @Test

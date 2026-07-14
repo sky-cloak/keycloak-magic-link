@@ -19,7 +19,8 @@ KC_NAME="kc-mlx-${SUFFIX}"; MAIL_NAME="mail-mlx-${SUFFIX}"; NET_NAME="net-mlx-${
 MAIL_HTTP_PORT=$((PORT + 1)); WORK="$(mktemp -d)"
 
 [[ -f "${JAR}" ]] || { echo "ERROR: ${JAR} missing - run mvn -Dkeycloak.version=${KC_VERSION} package" >&2; exit 1; }
-cleanup() { docker rm -f "${KC_NAME}" "${MAIL_NAME}" >/dev/null 2>&1 || true; docker network rm "${NET_NAME}" >/dev/null 2>&1 || true; rm -rf "${WORK}" 2>/dev/null || true; }
+source "$(dirname "$0")/jacoco.sh"; setup_jacoco
+cleanup() { collect_jacoco; docker rm -f "${KC_NAME}" "${MAIL_NAME}" >/dev/null 2>&1 || true; docker network rm "${NET_NAME}" >/dev/null 2>&1 || true; rm -rf "${WORK}" 2>/dev/null || true; }
 trap cleanup EXIT
 kcadm() { docker exec "${KC_NAME}" /opt/keycloak/bin/kcadm.sh "$@"; }
 fail() { echo "FAIL: $*" >&2; docker logs "${KC_NAME}" 2>&1 | tail -60 >&2; exit 1; }
@@ -58,6 +59,7 @@ for _ in $(seq 1 15); do curl -fsS "http://localhost:${MAIL_HTTP_PORT}/api/v2/me
 
 echo ">> [${KC_VERSION}] starting Keycloak"
 docker run -d --name "${KC_NAME}" --network "${NET_NAME}" -p "${PORT}:8080" \
+  "${JACOCO_DOCKER_ARGS[@]}" \
   -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
   -v "${JAR}:/opt/keycloak/providers/keycloak-magic-link.jar:ro" "${IMAGE}" start-dev >/dev/null
 up=; for _ in $(seq 1 80); do curl -fsS "${BASE}/realms/master" >/dev/null 2>&1 && { up=1; break; }; sleep 3; done

@@ -13,8 +13,8 @@ While the major version is `0`, we are explicitly in MVP and iteration territory
 - Breaking changes are allowed without a major bump until `1.0.0` ships. Any breaking change is
   called out at the top of the release notes.
 
-We will cut `1.0.0` when the extension is feature-stable for our roadmap, has been certified against
-the target integration (e.g. Okta/Entra for SCIM), and has been running unsupervised in production
+We will cut `1.0.0` when the extension is feature-stable for our roadmap, has been verified against
+the supported Keycloak versions in real login flows, and has been running unsupervised in production
 for at least one full minor cycle.
 
 ## Post-1.0: full Semantic Versioning

@@ -9,5 +9,5 @@
 ## Test plan
 
 - [ ] `mvn package` passes
-- [ ] `ci/integration-test.sh 26.0.7` passes
+- [ ] `ci/magic-link-*-test.sh 26.6.3` pass
 - [ ] tests added or updated for the change

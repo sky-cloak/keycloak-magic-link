@@ -15,8 +15,8 @@ Outstanding-link visibility is instead derived from the audit event stream
 (`issued` minus `consumed` / `revoked` / `expired`). All audit signal flows through
 Keycloak's native event system: consume success and failure as `LOGIN` /
 `LOGIN_ERROR` user events, and Mode B issuance and revoke as admin events. We use no
-bespoke sink and take no dependency on the sibling `event-webhooks` extension. The
+bespoke sink and take no dependency on any webhook extension. The
 event bus is the integration seam, so any configured listener (jboss-logging,
-Skycloak's audit pipeline, a customer SIEM, or `event-webhooks` if installed) receives
+Skycloak's audit pipeline, a SIEM, or a webhook extension if installed) receives
 the events without magic-link being wired to any of them. See
 [0001](./0001-same-device-actiontoken-resume.md) for the registry's single-use role.

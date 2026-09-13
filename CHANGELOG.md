@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format loosely foll
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to the versioning policy
 in [VERSIONING.md](./VERSIONING.md).
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-06-20
 
 Breaking release. Magic-link is now a Keycloak login-flow authenticator plus an admin-authenticated
 issuance API, built on Keycloak action tokens; the previous unauthenticated `POST /request` endpoint

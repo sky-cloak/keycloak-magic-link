@@ -12,4 +12,4 @@ reasonable window to release a fix before any public write-up.
 ## Supported versions
 
 Security fixes target the latest released minor version. The extension is supported
-against Keycloak 24, 25, and 26.
+against Keycloak 25 and 26.

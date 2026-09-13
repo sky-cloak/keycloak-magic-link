@@ -45,7 +45,8 @@ and 26.6 targets for everything this extension uses.
 
 ## Release process
 
-1. Bump the version in `pom.xml` (`<version>X.Y.Z</version>`).
+1. Bump the version in `pom.xml` (`<version>X.Y.Z</version>`) and `Version.VERSION` in
+   `src/main/java/io/skycloak/keycloak/magiclink/Version.java`. `VersionTest` fails the build if they differ.
 2. Update `CHANGELOG.md` (when present) with the new version's notes.
 3. Commit on `main` with a conventional message: `chore(release): vX.Y.Z`.
 4. Tag the release: `git tag vX.Y.Z && git push origin vX.Y.Z`.

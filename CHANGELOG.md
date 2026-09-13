@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format loosely foll
 [Keep a Changelog](https://keepachangelog.com/), and the project adheres to the versioning policy
 in [VERSIONING.md](./VERSIONING.md).
 
+## [Unreleased]
+
+### Fixed
+
+- The health endpoint reports the running version. The 0.3.0 release reported `0.2.1`.
+
 ## [0.3.0] - 2026-06-20
 
 Breaking release. Magic-link is now a Keycloak login-flow authenticator plus an admin-authenticated
